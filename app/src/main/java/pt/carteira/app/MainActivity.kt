@@ -17,10 +17,13 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -90,7 +93,7 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
             val source = dao.accountById(value.accountId) ?: ensureDefaultAccount()
             val budget = value.budgetId?.let { dao.budgetById(it) }
             val validBudget = when (value.kind) {
-                "Despesa" -> budget != null && budget.category.equals(value.category, ignoreCase = true)
+                "Despesa" -> budget != null
                 else -> value.budgetId == null
             }
             val validDestination = value.kind != "Transferência" ||
@@ -113,11 +116,21 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
         } catch (cancelled: CancellationException) { throw cancelled } catch (_: Exception) { false }
         onComplete(saved)
     }
-    fun addBudget(name:String, category:String, amount:Double) = viewModelScope.launch {
-        if(name.isNotBlank() && dao.categoryExists(category, "Despesa") && amount.isFinite() && amount>=0.01) {
+    fun addBudget(name:String, amount:Double) = viewModelScope.launch {
+        if(name.isNotBlank() && amount.isFinite() && amount>=0.01) {
             val rounded=BigDecimal.valueOf(amount).setScale(2,RoundingMode.HALF_UP).toDouble()
-            val id=dao.addBudget(Budget(name=name.trim(),category=category,limitAmount=rounded))
+            val id=dao.addBudget(Budget(name=name.trim(),limitAmount=rounded))
             dao.saveBudgetPeriod(BudgetPeriod(id,currentMonthStart(),rounded))
+        }
+    }
+    fun updateBudgetName(value:Budget) = viewModelScope.launch {
+        if(value.id>0 && value.name.isNotBlank() && dao.budgetById(value.id)!=null) {
+            dao.updateBudget(value.copy(name=value.name.trim()))
+        }
+    }
+    fun archiveBudget(budgetId:Long) = viewModelScope.launch {
+        dao.budgetById(budgetId)?.let { budget ->
+            if(budget.archivedFromMonth==null) dao.updateBudget(budget.copy(archivedFromMonth=currentMonthStart()))
         }
     }
     fun setBudgetLimit(budgetId:Long,monthStart:Long,amount:Double) = viewModelScope.launch {
@@ -148,29 +161,35 @@ class MainActivity : ComponentActivity() {
     var pendingAccountEdit by remember { mutableStateOf<Account?>(null) }
     var adjustmentAccount by remember { mutableStateOf<Account?>(null) }
     var pendingBudgetLimit by remember { mutableStateOf<BudgetLimitTarget?>(null) }
+    var pendingBudgetEdit by remember { mutableStateOf<Budget?>(null) }
+    var pendingBudgetArchive by remember { mutableStateOf<Budget?>(null) }
     var activeBudgetId by remember { mutableStateOf<Long?>(null) }
     var movementBudgetId by remember { mutableStateOf<Long?>(null) }
+    var selectedBudgetMonth by remember { mutableLongStateOf(currentMonthStart()) }
+    var budgetSort by remember { mutableStateOf("Maior gasto") }
+    var showBudgetRemaining by remember { mutableStateOf(false) }
     fun addMovement(budgetId: Long? = null) { pendingEdit = null; movementBudgetId = budgetId; dialog = "movimento" }
     fun editMovement(value: FinanceTransaction) { pendingEdit = value; movementBudgetId = null; dialog = "movimento" }
     val activeBudget = budgets.firstOrNull { it.id == activeBudgetId }
+    val canAddBudgetMovement = activeBudget != null && selectedBudgetMonth == currentMonthStart() && activeBudget.archivedFromMonth == null
     val pageTitle = if (section == "DetalheOrçamento") activeBudget?.name ?: "Orçamento" else section
     val total = accounts.sumOf { accountBalance(it, transactions) }
     Scaffold(containerColor=Paper, topBar={
         Row(Modifier.fillMaxWidth().background(Paper).statusBarsPadding().padding(horizontal=22.dp, vertical=18.dp), verticalAlignment=Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) { Text("CARTEIRA", style=MaterialTheme.typography.labelMedium, color=Green, fontWeight=FontWeight.Bold); Text(pageTitle, style=MaterialTheme.typography.headlineSmall, color=Ink, fontWeight=FontWeight.Bold) }
-            IconButton(onClick={addMovement(if(section=="DetalheOrçamento")activeBudgetId else null)}) { Icon(Icons.Default.Add, "Novo movimento", tint=Green) }
+            if(section!="DetalheOrçamento"||canAddBudgetMovement) IconButton(onClick={addMovement(if(section=="DetalheOrçamento")activeBudgetId else null)}) { Icon(Icons.Default.Add, "Novo movimento", tint=Green) }
         }
     }, bottomBar={ NavigationBar(containerColor=Color.White) {
         listOf("Início" to Icons.Default.Home, "Movimentos" to Icons.Default.ReceiptLong, "Orçamentos" to Icons.Default.PieChart, "Contas" to Icons.Default.AccountBalanceWallet, "Relatórios" to Icons.Default.BarChart).forEach { (label, icon) ->
-            NavigationBarItem(selected=section==label || (section=="DetalheOrçamento" && label=="Orçamentos"), onClick={section=label}, icon={Icon(icon,label)}, label={Text(label, style=MaterialTheme.typography.labelSmall)}, colors=NavigationBarItemDefaults.colors(selectedIconColor=Green,selectedTextColor=Green,indicatorColor=Mint))
+            NavigationBarItem(selected=section==label || (section=="DetalheOrçamento" && label=="Orçamentos"), onClick={section=label}, icon={Icon(icon,label)}, label={Text(label, style=MaterialTheme.typography.labelSmall.copy(fontSize=9.sp,lineHeight=10.sp),maxLines=1,softWrap=false,textAlign=TextAlign.Center)}, colors=NavigationBarItemDefaults.colors(selectedIconColor=Green,selectedTextColor=Green,indicatorColor=Mint))
         }
-    } }, floatingActionButton={ if(section in listOf("Movimentos","Orçamentos","Contas","DetalheOrçamento")) FloatingActionButton(onClick={when(section){"Orçamentos"->{pendingEdit=null;dialog="orçamento"};"Contas"->dialog="conta";"DetalheOrçamento"->addMovement(activeBudgetId);else->addMovement()}},containerColor=Green,contentColor=Color.White){Icon(Icons.Default.Add,"Adicionar")} }) { pad ->
+    } }, floatingActionButton={ if(section in listOf("Movimentos","Orçamentos","Contas")||(section=="DetalheOrçamento"&&canAddBudgetMovement)) FloatingActionButton(onClick={when(section){"Orçamentos"->{pendingEdit=null;dialog="orçamento"};"Contas"->dialog="conta";"DetalheOrçamento"->addMovement(activeBudgetId);else->addMovement()}},containerColor=Green,contentColor=Color.White){Icon(Icons.Default.Add,"Adicionar")} }) { pad ->
         when(section) {
-            "Início" -> HomePage(Modifier.padding(pad), total, transactions, accounts, budgets, budgetPeriods, {section=it}, {pendingDelete=it}, {editMovement(it)}, {addMovement()}, {budget->activeBudgetId=budget.id;section="DetalheOrçamento"})
+            "Início" -> HomePage(Modifier.padding(pad), total, transactions, accounts, budgets, budgetPeriods, {section=it}, {pendingDelete=it}, {editMovement(it)}, {addMovement()}, {budget->activeBudgetId=budget.id;selectedBudgetMonth=currentMonthStart();section="DetalheOrçamento"})
             "Movimentos" -> TransactionsPage(Modifier.padding(pad), transactions, accounts, {pendingDelete=it}, {editMovement(it)}, {addMovement()})
             "Contas" -> AccountsPage(Modifier.padding(pad), accounts, transactions, {pendingAccountEdit=null;dialog="conta"}, {pendingAccountEdit=it;dialog="editar-conta"})
-            "Orçamentos" -> BudgetsPage(Modifier.padding(pad), budgets, transactions, budgetPeriods, {pendingBudgetLimit=null;dialog="orçamento"}, {budget->activeBudgetId=budget.id;section="DetalheOrçamento"})
-            "DetalheOrçamento" -> BudgetDetailPage(Modifier.padding(pad), activeBudget, transactions, accounts, budgetPeriods, {addMovement(activeBudget?.id)}, {pendingDelete=it}, {editMovement(it)}, {budget,monthStart,amount->pendingBudgetLimit=BudgetLimitTarget(budget.id,monthStart,amount);dialog="budget-limit"})
+            "Orçamentos" -> BudgetsPage(Modifier.padding(pad), budgets, transactions, budgetPeriods, selectedBudgetMonth, {selectedBudgetMonth=it}, budgetSort, {budgetSort=it}, showBudgetRemaining, {showBudgetRemaining=it}, {pendingBudgetLimit=null;pendingBudgetEdit=null;dialog="orçamento"}, {budget->activeBudgetId=budget.id;section="DetalheOrçamento"})
+            "DetalheOrçamento" -> BudgetDetailPage(Modifier.padding(pad), activeBudget, transactions, accounts, budgetPeriods, selectedBudgetMonth, {selectedBudgetMonth=it}, {addMovement(activeBudget?.id)}, {pendingDelete=it}, {editMovement(it)}, {budget,monthStart,amount->pendingBudgetLimit=BudgetLimitTarget(budget.id,monthStart,amount);dialog="budget-limit"}, {budget->pendingBudgetEdit=budget;dialog="editar-orçamento"}, {budget->pendingBudgetArchive=budget})
             else -> ReportsPage(Modifier.padding(pad), transactions)
         }
     }
@@ -178,7 +197,8 @@ class MainActivity : ComponentActivity() {
         "movimento" -> TransactionDialog(accounts, budgets, categories, budgets.firstOrNull{it.id==movementBudgetId}, pendingEdit, { value, done -> model.saveTransaction(value, done) }, { pendingEdit=null;dialog="";movementBudgetId=null }, { pendingEdit=null;movementBudgetId=null;dialog="orçamento" })
         "conta" -> AccountDialog(null,0.0, {value->model.saveAccount(value);dialog=""}, {dialog=""}, {})
         "editar-conta" -> AccountDialog(pendingAccountEdit, pendingAccountEdit?.let{accountBalance(it,transactions)}?:0.0, {value->model.saveAccount(value);pendingAccountEdit=null;dialog=""}, {pendingAccountEdit=null;dialog=""}, {account->adjustmentAccount=account;pendingAccountEdit=null;dialog="acerto-conta"})
-        "orçamento" -> SimpleDialog("Novo orçamento", listOf("Nome","Categoria","Limite (€)"), listOf("Casa",categories.firstOrNull{it.kind=="Despesa"}?.name.orEmpty(),"500"), categories.filter{it.kind=="Despesa"}.map{it.name}, {v->model.addBudget(v[0],v[1],v[2].replace(',','.').toDoubleOrNull()?:0.0);dialog=""}, {dialog=""}, selectionFieldIndex=1)
+        "orçamento" -> BudgetDialog(null,500.0,{name,limit->model.addBudget(name,limit);dialog=""},{dialog=""})
+        "editar-orçamento" -> pendingBudgetEdit?.let{budget->BudgetDialog(budget,budgetLimitFor(budget,budgetPeriods,selectedBudgetMonth),{name,_->model.updateBudgetName(budget.copy(name=name));pendingBudgetEdit=null;dialog=""},{pendingBudgetEdit=null;dialog=""})}
         "acerto-conta" -> adjustmentAccount?.let{account->AdjustmentDialog(account,accountBalance(account,transactions),{amount,decrease,note,done->model.saveTransaction(FinanceTransaction(title="Acerto de saldo",amount=if(decrease)-amount else amount,kind="Ajuste",category="Acerto de saldo",accountId=account.id,note=note),done)},{adjustmentAccount=null;dialog=""})}
         "budget-limit" -> pendingBudgetLimit?.let{target->BudgetLimitDialog(target,{amount->model.setBudgetLimit(target.budgetId,target.monthStart,amount);pendingBudgetLimit=null;dialog=""},{pendingBudgetLimit=null;dialog=""})}
     }
@@ -191,19 +211,29 @@ class MainActivity : ComponentActivity() {
             dismissButton={TextButton(onClick={pendingDelete=null}){Text("Cancelar",color=Green)}}
         )
     }
+    pendingBudgetArchive?.let { budget ->
+        AlertDialog(
+            onDismissRequest={pendingBudgetArchive=null},
+            title={Text("Arquivar orçamento?",color=Ink,fontWeight=FontWeight.Bold)},
+            text={Text("${budget.name} deixa de aparecer a partir deste mês, mas continua disponível nos meses anteriores.",color=Muted)},
+            confirmButton={TextButton(onClick={model.archiveBudget(budget.id);pendingBudgetArchive=null;selectedBudgetMonth=shiftMonth(currentMonthStart(),-1)}){Text("Arquivar",color=Coral)}},
+            dismissButton={TextButton(onClick={pendingBudgetArchive=null}){Text("Cancelar",color=Green)}}
+        )
+    }
 }
 
 @Composable private fun HomePage(modifier:Modifier,total:Double,tx:List<FinanceTransaction>,accounts:List<Account>,budgets:List<Budget>,budgetPeriods:List<BudgetPeriod>,navigate:(String)->Unit,requestDelete:(FinanceTransaction)->Unit,requestEdit:(FinanceTransaction)->Unit,addMovement:()->Unit,openBudget:(Budget)->Unit) {
     val cal=Calendar.getInstance(); val month=cal.get(Calendar.MONTH); val year=cal.get(Calendar.YEAR)
     val monthly=tx.filter { val c=Calendar.getInstance().apply{timeInMillis=it.date}; c.get(Calendar.MONTH)==month&&c.get(Calendar.YEAR)==year }
     val spent=moneySum(monthly.filter{it.kind=="Despesa"}.map{it.amount}); val income=moneySum(monthly.filter{it.kind=="Receita"}.map{it.amount})
+    val activeBudgets=budgets.filter{budgetVisibleInMonth(it,currentMonthStart())}
     LazyColumn(modifier.fillMaxSize(), contentPadding=PaddingValues(start=20.dp,end=20.dp,bottom=24.dp), verticalArrangement=Arrangement.spacedBy(16.dp)) {
         item { BalanceCard(total, income, spent) }
         item { SectionTitle("As minhas contas", "Ver todas", {navigate("Contas")}) }
         item { Row(horizontalArrangement=Arrangement.spacedBy(10.dp)) { accounts.take(3).forEach { AccountMini(it,tx) }; AddMini { navigate("Contas") } } }
         item { SectionTitle("Orçamento deste mês", "Ver orçamento", {navigate("Orçamentos")}) }
-        if(budgets.isEmpty()) item { EmptyCard("Ainda não tens orçamentos", "Define limites por categoria para acompanhar as despesas.", "Criar orçamento", {navigate("Orçamentos")}) }
-        else items(budgets.take(3)) { b -> BudgetRow(b, tx, budgetPeriods, currentMonthStart()) { openBudget(b) } }
+        if(activeBudgets.isEmpty()) item { EmptyCard("Ainda não tens orçamentos", "Define limites mensais para acompanhar as despesas.", "Criar orçamento", {navigate("Orçamentos")}) }
+        else items(activeBudgets.take(3)) { b -> BudgetRow(b, tx, budgetPeriods, currentMonthStart()) { openBudget(b) } }
         item { SectionTitle("Movimentos recentes", "Ver todos", {navigate("Movimentos")}) }
         if(tx.isEmpty()) item { EmptyCard("Tudo começa aqui", "Regista a tua primeira receita ou despesa.", "Adicionar movimento", addMovement) }
         else items(tx.take(5)) { TransactionRow(it,accounts,requestDelete,requestEdit) }
@@ -238,43 +268,119 @@ class MainActivity : ComponentActivity() {
 @Composable private fun AccountsPage(modifier:Modifier,accounts:List<Account>,tx:List<FinanceTransaction>,add:()->Unit,edit:(Account)->Unit){Column(modifier.fillMaxSize().padding(20.dp)){Row(verticalAlignment=Alignment.CenterVertically){Text("Contas e carteiras",Modifier.weight(1f),style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold,color=Ink);TextButton(onClick=add){Text("+ Adicionar")}};Spacer(Modifier.height(8.dp));accounts.forEach{account->AccountDetail(account,tx){edit(account)};Spacer(Modifier.height(10.dp))}}}
 @Composable private fun AccountDetail(a:Account,tx:List<FinanceTransaction>,edit:()->Unit){val bal=accountBalance(a,tx);Row(Modifier.fillMaxWidth().background(Color.White,RoundedCornerShape(18.dp)).padding(start=18.dp,top=12.dp,bottom=12.dp,end=8.dp),verticalAlignment=Alignment.CenterVertically){Icon(Icons.Default.AccountBalanceWallet,null,tint=Green,modifier=Modifier.size(40.dp));Column(Modifier.weight(1f).padding(start=14.dp)){Text(a.name,color=Ink,fontWeight=FontWeight.Bold);Text(a.type,color=Muted,style=MaterialTheme.typography.bodySmall)};Text(money(bal),color=Ink,fontWeight=FontWeight.Bold);IconButton(onClick=edit){Icon(Icons.Default.Edit,"Editar conta",tint=Green)}} }
 
-@Composable private fun BudgetsPage(modifier:Modifier,budgets:List<Budget>,tx:List<FinanceTransaction>,budgetPeriods:List<BudgetPeriod>,add:()->Unit,openBudget:(Budget)->Unit){
-    LazyColumn(modifier.fillMaxSize(),contentPadding=PaddingValues(20.dp),verticalArrangement=Arrangement.spacedBy(10.dp)){
-        item { Row(verticalAlignment=Alignment.CenterVertically){Column(Modifier.weight(1f)){Text("Os teus limites",style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold,color=Ink);Text("Toca num orçamento para ver os registos",color=Muted)};TextButton(onClick=add){Text("+ Criar")}} }
-        if(budgets.isEmpty()) item { EmptyCard("Orçamento sob controlo","Cria um limite mensal para uma categoria.","Criar orçamento",add) }
-        else items(budgets){budget->BudgetRow(budget,tx,budgetPeriods,currentMonthStart()){openBudget(budget)}}
+@Composable private fun BudgetsPage(
+    modifier:Modifier,budgets:List<Budget>,tx:List<FinanceTransaction>,budgetPeriods:List<BudgetPeriod>,
+    selectedMonth:Long,onMonthChange:(Long)->Unit,sort:String,onSortChange:(String)->Unit,
+    showRemaining:Boolean,onShowRemainingChange:(Boolean)->Unit,add:()->Unit,openBudget:(Budget)->Unit
+){
+    val visible=budgets.filter{budgetVisibleInMonth(it,selectedMonth)}
+    val sorted=when(sort){
+        "Nome A–Z"->visible.sortedBy{it.name.lowercase(Locale("pt","PT"))}
+        "Nome Z–A"->visible.sortedByDescending{it.name.lowercase(Locale("pt","PT"))}
+        "Menor gasto"->visible.sortedBy{budgetSpent(it,tx,selectedMonth)}
+        "Maior limite"->visible.sortedByDescending{budgetLimitFor(it,budgetPeriods,selectedMonth)}
+        "Menor limite"->visible.sortedBy{budgetLimitFor(it,budgetPeriods,selectedMonth)}
+        "Maior percentagem"->visible.sortedByDescending{budgetSpent(it,tx,selectedMonth)/budgetLimitFor(it,budgetPeriods,selectedMonth).coerceAtLeast(.01)}
+        "Menor percentagem"->visible.sortedBy{budgetSpent(it,tx,selectedMonth)/budgetLimitFor(it,budgetPeriods,selectedMonth).coerceAtLeast(.01)}
+        else->visible.sortedByDescending{budgetSpent(it,tx,selectedMonth)}
     }
-}
-
-@Composable private fun BudgetRow(b:Budget,tx:List<FinanceTransaction>,periods:List<BudgetPeriod>,monthStart:Long,onClick:()->Unit){
-    val limit=budgetLimitFor(b,periods,monthStart); val spent=budgetSpent(b,tx,monthStart); val p=(spent/limit).toFloat().coerceIn(0f,1f)
-    Column(Modifier.fillMaxWidth().clickable(onClick=onClick).background(Color.White,RoundedCornerShape(18.dp)).padding(16.dp)){
-        Row(verticalAlignment=Alignment.CenterVertically){Column(Modifier.weight(1f)){Text(b.name,color=Ink,fontWeight=FontWeight.Bold);Text(b.category,color=Muted,style=MaterialTheme.typography.bodySmall)};Text("${money(spent)} / ${money(limit)}",color=Ink,fontWeight=FontWeight.SemiBold)}
-        Spacer(Modifier.height(12.dp));LinearProgressIndicator(progress={p},modifier=Modifier.fillMaxWidth().height(7.dp),color=if(p>.9f)Coral else Green,trackColor=Mint)
-        Text(if(spent>limit)"Ultrapassaste ${money(spent-limit)}" else "Disponível ${money(limit-spent)}",color=if(p>.9f)Coral else Muted,style=MaterialTheme.typography.labelSmall,modifier=Modifier.padding(top=7.dp))
-    }
-}
-
-@Composable private fun BudgetDetailPage(modifier:Modifier,budget:Budget?,tx:List<FinanceTransaction>,accounts:List<Account>,periods:List<BudgetPeriod>,add:()->Unit,requestDelete:(FinanceTransaction)->Unit,requestEdit:(FinanceTransaction)->Unit,editLimit:(Budget,Long,Double)->Unit){
-    if(budget==null){EmptyCard("Orçamento indisponível","Este orçamento já não existe.","Voltar aos orçamentos",{}) ; return}
-    var selectedMonth by remember(budget.id){mutableLongStateOf(currentMonthStart())}
-    val records=budgetTransactions(budget,tx,selectedMonth)
-    Column(modifier.fillMaxSize().padding(horizontal=20.dp)){
-        Spacer(Modifier.height(8.dp))
-        Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){
-            IconButton(onClick={selectedMonth=shiftMonth(selectedMonth,-1)}){Icon(Icons.Default.ChevronLeft,"Mês anterior",tint=Green)}
-            Text(monthLabel(selectedMonth),Modifier.weight(1f),style=MaterialTheme.typography.titleMedium,color=Ink,fontWeight=FontWeight.Bold)
-            IconButton(onClick={selectedMonth=shiftMonth(selectedMonth,1)},enabled=selectedMonth<currentMonthStart()){Icon(Icons.Default.ChevronRight,"Mês seguinte",tint=Green)}
+    val totalLimit=moneySum(visible.map{budgetLimitFor(it,budgetPeriods,selectedMonth)})
+    val totalSpent=moneySum(visible.map{budgetSpent(it,tx,selectedMonth)})
+    val totalRemaining=moneySum(listOf(totalLimit,-totalSpent))
+    var sortExpanded by remember{mutableStateOf(false)}
+    LazyColumn(modifier.fillMaxSize(),contentPadding=PaddingValues(start=16.dp,end=16.dp,top=8.dp,bottom=16.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){
+        item {
+            Row(verticalAlignment=Alignment.CenterVertically){
+                Text("Orçamentos mensais",Modifier.weight(1f),style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold,color=Ink)
+                Box {
+                    TextButton(onClick={sortExpanded=true}){Icon(Icons.Default.Sort,null,tint=Green);Spacer(Modifier.width(4.dp));Text("Ordenar",color=Green)}
+                    DropdownMenu(expanded=sortExpanded,onDismissRequest={sortExpanded=false}){
+                        listOf("Maior gasto","Menor gasto","Maior limite","Menor limite","Maior percentagem","Menor percentagem","Nome A–Z","Nome Z–A").forEach{option->DropdownMenuItem(text={Text(option)},onClick={onSortChange(option);sortExpanded=false})}
+                    }
+                }
+            }
+            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(Color.White).padding(3.dp)){
+                listOf(false to "Gasto (%)",true to "Restante (€)").forEach{(remaining,label)->
+                    TextButton(onClick={onShowRemainingChange(remaining)},modifier=Modifier.weight(1f).background(if(showRemaining==remaining)Green else Color.Transparent,RoundedCornerShape(22.dp))){Text(label,color=if(showRemaining==remaining)Color.White else Ink)}
+                }
+            }
         }
-        BudgetRow(budget,tx,periods,selectedMonth){}
+        item { MonthNavigator(selectedMonth,onMonthChange) }
+        item { BudgetTotalsCard(totalLimit,totalSpent,totalRemaining) }
+        if(sorted.isEmpty()) item { EmptyCard("Sem orçamentos neste mês","Cria um limite mensal para acompanhar as tuas despesas.","Criar orçamento",add) }
+        else items(sorted,key={it.id}){budget->BudgetRow(budget,tx,budgetPeriods,selectedMonth,showRemaining){openBudget(budget)}}
+        item { OutlinedButton(onClick=add,modifier=Modifier.fillMaxWidth()){Icon(Icons.Default.Add,null);Spacer(Modifier.width(6.dp));Text("Criar orçamento mensal")} }
+    }
+}
+
+@Composable private fun BudgetTotalsCard(totalLimit:Double,totalSpent:Double,totalRemaining:Double){
+    Column(Modifier.fillMaxWidth().background(Ink,RoundedCornerShape(19.dp)).padding(14.dp)){
+        Text("TOTAL DOS ORÇAMENTOS",color=Color.White.copy(.72f),style=MaterialTheme.typography.labelSmall,fontWeight=FontWeight.SemiBold)
+        Text(money(totalLimit),color=Color.White,style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold,modifier=Modifier.padding(top=2.dp,bottom=10.dp))
+        Row(horizontalArrangement=Arrangement.spacedBy(8.dp)){
+            Column(Modifier.weight(1f).background(Color.White.copy(.09f),RoundedCornerShape(13.dp)).padding(horizontal=10.dp,vertical=8.dp)){
+                Text("Já gasto",color=Color.White.copy(.72f),style=MaterialTheme.typography.labelSmall)
+                Text(money(totalSpent),color=Color(0xFFFFC9BE),fontWeight=FontWeight.SemiBold,style=MaterialTheme.typography.bodyMedium,maxLines=1)
+            }
+            Column(Modifier.weight(1f).background(Color.White.copy(.09f),RoundedCornerShape(13.dp)).padding(horizontal=10.dp,vertical=8.dp)){
+                Text(if(totalRemaining<0)"Acima do limite" else "Ainda por gastar",color=Color.White.copy(.72f),style=MaterialTheme.typography.labelSmall,maxLines=1)
+                Text(money(kotlin.math.abs(totalRemaining)),color=if(totalRemaining<0)Color(0xFFFFC9BE) else Color(0xFFB5E7C7),fontWeight=FontWeight.SemiBold,style=MaterialTheme.typography.bodyMedium,maxLines=1)
+            }
+        }
+    }
+}
+
+@Composable private fun MonthNavigator(month:Long,onMonthChange:(Long)->Unit){
+    Row(Modifier.fillMaxWidth().background(Color.White,RoundedCornerShape(24.dp)).padding(horizontal=8.dp,vertical=2.dp),verticalAlignment=Alignment.CenterVertically){
+        IconButton(onClick={onMonthChange(shiftMonth(month,-1))}){Icon(Icons.Default.ChevronLeft,"Mês anterior",tint=Green)}
+        TextButton(onClick={onMonthChange(currentMonthStart())},modifier=Modifier.weight(1f)){Text(if(month==currentMonthStart())"Este mês" else monthLabel(month),color=Ink,fontWeight=FontWeight.SemiBold)}
+        IconButton(onClick={onMonthChange(shiftMonth(month,1))}){Icon(Icons.Default.ChevronRight,"Mês seguinte",tint=Green)}
+    }
+}
+
+@Composable private fun BudgetRow(b:Budget,tx:List<FinanceTransaction>,periods:List<BudgetPeriod>,monthStart:Long,showRemaining:Boolean=false,onClick:()->Unit){
+    val limit=budgetLimitFor(b,periods,monthStart).coerceAtLeast(0.01); val spent=budgetSpent(b,tx,monthStart); val ratio=spent/limit; val progress=ratio.toFloat().coerceIn(0f,1f)
+    Column(Modifier.fillMaxWidth().clickable(onClick=onClick).background(Color.White,RoundedCornerShape(17.dp)).padding(horizontal=13.dp,vertical=10.dp)){
+        Row(verticalAlignment=Alignment.CenterVertically){
+            Text(b.name,color=Ink,fontWeight=FontWeight.SemiBold,maxLines=1,modifier=Modifier.weight(1f))
+            Text(if(showRemaining)money(limit-spent) else "${(ratio*100).toInt()}% de ${money(limit)}",color=if(ratio>1)Coral else Ink,fontWeight=FontWeight.SemiBold,style=MaterialTheme.typography.bodySmall,maxLines=1,softWrap=false,textAlign=TextAlign.End)
+        }
+        Spacer(Modifier.height(6.dp));LinearProgressIndicator(progress={progress},modifier=Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(5.dp)),color=if(ratio>1)Coral else Green,trackColor=Mint,strokeCap= androidx.compose.ui.graphics.StrokeCap.Round)
+        Text(if(showRemaining)"Gasto ${money(spent)}" else if(spent>limit)"Ultrapassado ${money(spent-limit)}" else "Disponível ${money(limit-spent)}",color=if(ratio>1)Coral else Muted,style=MaterialTheme.typography.labelSmall,modifier=Modifier.padding(top=4.dp))
+    }
+}
+
+@Composable private fun BudgetDetailPage(
+    modifier:Modifier,budget:Budget?,tx:List<FinanceTransaction>,accounts:List<Account>,periods:List<BudgetPeriod>,
+    selectedMonth:Long,onMonthChange:(Long)->Unit,add:()->Unit,requestDelete:(FinanceTransaction)->Unit,
+    requestEdit:(FinanceTransaction)->Unit,editLimit:(Budget,Long,Double)->Unit,
+    editName:(Budget)->Unit,archive:(Budget)->Unit
+){
+    if(budget==null){EmptyCard("Orçamento indisponível","Este orçamento já não existe.","Voltar aos orçamentos",{}) ; return}
+    val records=budgetTransactions(budget,tx,selectedMonth)
+    val archivedInSelectedMonth=budget.archivedFromMonth?.let{selectedMonth>=it}?:false
+    val canAdd=selectedMonth==currentMonthStart()&&!archivedInSelectedMonth
+    Column(modifier.fillMaxSize().padding(horizontal=16.dp)){
+        MonthNavigator(selectedMonth,onMonthChange)
+        Row(Modifier.fillMaxWidth().padding(top=4.dp,bottom=4.dp),verticalAlignment=Alignment.CenterVertically){
+            Text("${records.size} registos",Modifier.weight(1f),color=Muted,style=MaterialTheme.typography.labelMedium)
+            TextButton(onClick={editName(budget)}){Icon(Icons.Default.Edit,null);Spacer(Modifier.width(4.dp));Text("Editar nome")}
+            if(budget.archivedFromMonth==null) TextButton(onClick={archive(budget)}){Icon(Icons.Default.Archive,null);Spacer(Modifier.width(4.dp));Text("Arquivar",color=Coral)}
+        }
+        BudgetRow(budget,tx,periods,selectedMonth){ }
         TextButton(onClick={editLimit(budget,selectedMonth,budgetLimitFor(budget,periods,selectedMonth))},modifier=Modifier.align(Alignment.End)){Text("Alterar limite deste mês",color=Green)}
+        if(archivedInSelectedMonth) Text("Orçamento arquivado a partir deste mês. Os registos anteriores continuam disponíveis.",color=Muted,style=MaterialTheme.typography.bodySmall,modifier=Modifier.padding(vertical=4.dp))
         Text("Toca num movimento para editar; mantém premido para apagar.",color=Muted,style=MaterialTheme.typography.labelSmall)
         Row(Modifier.fillMaxWidth().padding(top=8.dp,bottom=8.dp),verticalAlignment=Alignment.CenterVertically){Text("Registos do mês",Modifier.weight(1f),style=MaterialTheme.typography.titleMedium,color=Ink,fontWeight=FontWeight.Bold);Text(records.size.toString(),color=Muted)}
-        if(records.isEmpty()) EmptyCard("Ainda sem registos","Os movimentos deste orçamento aparecem aqui.","Adicionar movimento",add)
-        else LazyColumn(Modifier.weight(1f),verticalArrangement=Arrangement.spacedBy(8.dp)){items(records){TransactionRow(it,accounts,requestDelete,requestEdit)}}
-        if(records.isNotEmpty()) Button(onClick=add,modifier=Modifier.fillMaxWidth().padding(vertical=10.dp)){Icon(Icons.Default.Add,null);Spacer(Modifier.width(8.dp));Text("Adicionar movimento")}
+        if(records.isEmpty()) {
+            if(canAdd) EmptyCard("Ainda sem registos","As despesas associadas a este orçamento aparecem aqui.","Adicionar movimento",add)
+            else Text("Sem registos neste mês.",color=Muted,modifier=Modifier.padding(vertical=16.dp))
+        } else LazyColumn(Modifier.weight(1f),verticalArrangement=Arrangement.spacedBy(8.dp)){items(records,key={it.id}){TransactionRow(it,accounts,requestDelete,requestEdit)}}
+        if(canAdd) Button(onClick=add,modifier=Modifier.fillMaxWidth().padding(vertical=10.dp)){Icon(Icons.Default.Add,null);Spacer(Modifier.width(8.dp));Text("Adicionar movimento")}
     }
 }
+
+private fun budgetVisibleInMonth(budget:Budget,monthStart:Long):Boolean = budget.archivedFromMonth?.let{monthStart<it}?:true
 
 private fun budgetTransactions(budget:Budget,tx:List<FinanceTransaction>,monthStart:Long):List<FinanceTransaction> = tx.filter { t ->
     t.kind=="Despesa" && currentMonthStart(t.date)==monthStart && t.budgetId==budget.id
@@ -312,7 +418,7 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
     var amount by remember(movementId){mutableStateOf(initial?.amount?.let{kotlin.math.abs(it)}?.toString().orEmpty())}
     var kind by remember(movementId){mutableStateOf(initial?.kind?:"Despesa")}
     var adjustmentDecreases by remember(movementId){mutableStateOf(initial?.let{it.kind=="Ajuste"&&it.amount<0}?:false)}
-    var categoryName by remember(movementId,pinnedBudget?.id){mutableStateOf(initial?.category?:pinnedBudget?.category?:budgets.firstOrNull()?.category.orEmpty())}
+    var categoryName by remember(movementId,pinnedBudget?.id){mutableStateOf(initial?.category?:categories.firstOrNull{it.kind=="Despesa"}?.name.orEmpty())}
     var note by remember(movementId){mutableStateOf(initial?.note.orEmpty())}
     var recurring by remember(movementId){mutableStateOf(initial?.recurring?:false)}
     var accountId by remember(movementId){mutableLongStateOf(initial?.accountId?:accounts.firstOrNull()?.id?:0L)}
@@ -321,9 +427,9 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
     var accountMenu by remember{mutableStateOf(false)}; var destinationMenu by remember{mutableStateOf(false)}
     var budgetMenu by remember{mutableStateOf(false)}; var categoryMenu by remember{mutableStateOf(false)}
     var error by remember{mutableStateOf("")}; var saving by remember{mutableStateOf(false)}
-    val selectedBudget=budgets.firstOrNull{it.id==budgetId&&it.category.equals(categoryName,true)}?:pinnedBudget?.takeIf{it.category.equals(categoryName,true)}
     val availableCategories=categories.filter{it.kind==kind}.map{it.name}
-    val availableBudgets=budgets.filter{it.category.equals(categoryName,true)}
+    val availableBudgets=budgets.filter{budgetVisibleInMonth(it,currentMonthStart())||it.id==initial?.budgetId}
+    val selectedBudget=pinnedBudget?:availableBudgets.firstOrNull{it.id==budgetId}
     val movementKinds=if(initial?.kind=="Ajuste") listOf("Despesa","Receita","Transferência","Ajuste") else listOf("Despesa","Receita","Transferência")
 
     LaunchedEffect(accounts){
@@ -331,14 +437,11 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
         if(accounts.none{it.id==destinationId&&it.id!=accountId}) destinationId=accounts.firstOrNull{it.id!=accountId}?.id?:accountId
     }
     LaunchedEffect(kind,budgets,categories,pinnedBudget?.id){
+        if(categoryName !in availableCategories) categoryName=availableCategories.firstOrNull().orEmpty()
         if(kind=="Despesa"){
-            if(categoryName !in availableCategories) categoryName=budgets.firstOrNull()?.category?:availableCategories.firstOrNull().orEmpty()
-            val budget=budgets.firstOrNull{it.id==budgetId&&it.category.equals(categoryName,true)}?:pinnedBudget?.takeIf{it.category.equals(categoryName,true)}
-            budgetId=budget?.id?:0L
-            if(budget!=null) categoryName=budget.category
-        } else if(availableCategories.none{it==categoryName}) {
-            categoryName=availableCategories.firstOrNull().orEmpty()
-        }
+            val budget=if(pinnedBudget!=null)pinnedBudget else availableBudgets.firstOrNull{it.id==budgetId}
+            if(budget==null) budgetId=0L else budgetId=budget.id
+        } else budgetId=0L
     }
     AlertDialog(
         onDismissRequest={if(!saving)close()},
@@ -356,24 +459,20 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
             OutlinedTextField(amount,{amount=it},label={Text("Montante (€)")},singleLine=true,keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Decimal))
 
             if(kind=="Despesa"){
-                when {
-                    pinnedBudget!=null -> Text("Categoria: ${pinnedBudget.category}",color=Muted,style=MaterialTheme.typography.bodyMedium)
-                    else -> {
-                        ExposedDropdownMenuBox(expanded=categoryMenu,onExpandedChange={categoryMenu=availableCategories.isNotEmpty()&&!categoryMenu}){
-                            OutlinedTextField(categoryName,{},readOnly=true,label={Text("Categoria")},modifier=Modifier.menuAnchor().fillMaxWidth(),trailingIcon={ExposedDropdownMenuDefaults.TrailingIcon(expanded=categoryMenu)})
-                            ExposedDropdownMenu(expanded=categoryMenu,onDismissRequest={categoryMenu=false}){availableCategories.forEach{item->DropdownMenuItem(text={Text(item)},onClick={if(categoryName!=item)budgetId=0L;categoryName=item;categoryMenu=false})}}
-                        }
-                        if(availableBudgets.isEmpty()) Column {
-                            Text("Para registar uma despesa nesta categoria, cria primeiro um orçamento.",color=Muted,style=MaterialTheme.typography.bodySmall)
-                            TextButton(onClick=createBudget){Text("Criar orçamento",color=Green)}
-                        } else ExposedDropdownMenuBox(expanded=budgetMenu,onExpandedChange={budgetMenu=!budgetMenu}){
-                            OutlinedTextField(selectedBudget?.name.orEmpty(),{},readOnly=true,label={Text("Orçamento obrigatório")},placeholder={Text("Selecionar orçamento")},modifier=Modifier.menuAnchor().fillMaxWidth(),trailingIcon={ExposedDropdownMenuDefaults.TrailingIcon(expanded=budgetMenu)})
-                            ExposedDropdownMenu(expanded=budgetMenu,onDismissRequest={budgetMenu=false}){availableBudgets.forEach{item->DropdownMenuItem(text={Text(item.name)},onClick={budgetId=item.id;budgetMenu=false})}}
-                        }
-                    }
+                ExposedDropdownMenuBox(expanded=categoryMenu,onExpandedChange={categoryMenu=availableCategories.isNotEmpty()&&!categoryMenu}){
+                    OutlinedTextField(categoryName,{},readOnly=true,label={Text("Categoria")},modifier=Modifier.menuAnchor().fillMaxWidth(),trailingIcon={ExposedDropdownMenuDefaults.TrailingIcon(expanded=categoryMenu)})
+                    ExposedDropdownMenu(expanded=categoryMenu,onDismissRequest={categoryMenu=false}){availableCategories.forEach{item->DropdownMenuItem(text={Text(item)},onClick={categoryName=item;categoryMenu=false})}}
+                }
+                if(pinnedBudget!=null) OutlinedTextField(pinnedBudget.name,{},readOnly=true,label={Text("Orçamento")},supportingText={Text("Movimento associado a este orçamento.")},modifier=Modifier.fillMaxWidth())
+                else if(availableBudgets.isEmpty()) Column {
+                    Text("É obrigatório associar cada despesa a um orçamento.",color=Muted,style=MaterialTheme.typography.bodySmall)
+                    TextButton(onClick=createBudget){Text("Criar orçamento mensal",color=Green)}
+                } else ExposedDropdownMenuBox(expanded=budgetMenu,onExpandedChange={budgetMenu=!budgetMenu}){
+                    OutlinedTextField(selectedBudget?.name.orEmpty(),{},readOnly=true,label={Text("Orçamento obrigatório")},placeholder={Text("Selecionar orçamento")},modifier=Modifier.menuAnchor().fillMaxWidth(),trailingIcon={ExposedDropdownMenuDefaults.TrailingIcon(expanded=budgetMenu)})
+                    ExposedDropdownMenu(expanded=budgetMenu,onDismissRequest={budgetMenu=false}){availableBudgets.forEach{item->DropdownMenuItem(text={Text(item.name)},onClick={budgetId=item.id;budgetMenu=false})}}
                 }
             } else {
-                ExposedDropdownMenuBox(expanded=categoryMenu,onExpandedChange={categoryMenu=!categoryMenu}){
+                ExposedDropdownMenuBox(expanded=categoryMenu,onExpandedChange={categoryMenu=availableCategories.isNotEmpty()&&!categoryMenu}){
                     OutlinedTextField(categoryName,{},readOnly=true,label={Text("Categoria")},modifier=Modifier.menuAnchor().fillMaxWidth(),trailingIcon={ExposedDropdownMenuDefaults.TrailingIcon(expanded=categoryMenu)})
                     ExposedDropdownMenu(expanded=categoryMenu,onDismissRequest={categoryMenu=false}){availableCategories.forEach{item->DropdownMenuItem(text={Text(item)},onClick={categoryName=item;categoryMenu=false})}}
                 }
@@ -463,6 +562,31 @@ private data class BudgetLimitTarget(val budgetId:Long,val monthStart:Long,val c
         if(parsed==null||!parsed.isFinite()||parsed<0.01) error="Indica um valor válido, mínimo de 0,01 €."
         else {error="";saving=true;save(parsed,decreases,note){success->saving=false;if(success)close() else error="Não foi possível guardar o movimento de acerto."}}
     }){Text(if(saving)"A guardar…" else "Guardar movimento",color=Green,fontWeight=FontWeight.Bold)}},dismissButton={TextButton(onClick=close,enabled=!saving){Text("Cancelar",color=Muted)}})
+}
+
+@Composable private fun BudgetDialog(initial:Budget?,initialLimit:Double,save:(String,Double)->Unit,close:()->Unit){
+    val budgetId=initial?.id?:0L
+    var name by remember(budgetId){mutableStateOf(initial?.name.orEmpty())}
+    var limit by remember(budgetId){mutableStateOf(initialLimit.toString())}
+    var error by remember(budgetId){mutableStateOf("")}
+    AlertDialog(
+        onDismissRequest=close,
+        title={Text(if(initial==null)"Novo orçamento mensal" else "Editar nome do orçamento",color=Ink,fontWeight=FontWeight.Bold)},
+        text={Column(verticalArrangement=Arrangement.spacedBy(10.dp)){
+            OutlinedTextField(name,{name=it},label={Text("Nome do orçamento")},singleLine=true,modifier=Modifier.fillMaxWidth())
+            if(initial==null) OutlinedTextField(limit,{limit=it},label={Text("Limite mensal (€)")},singleLine=true,keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Decimal),modifier=Modifier.fillMaxWidth())
+            if(error.isNotBlank()) Text(error,color=Coral,style=MaterialTheme.typography.bodySmall)
+        }},
+        confirmButton={TextButton(onClick={
+            val parsed=if(initial==null)limit.replace(',','.').toDoubleOrNull() else initialLimit
+            when{
+                name.isBlank()->error="Indica o nome do orçamento."
+                parsed==null||!parsed.isFinite()||parsed<0.01->error="Indica um limite mensal válido, mínimo de 0,01 €."
+                else->{error="";save(name.trim(),parsed)}
+            }
+        }){Text("Guardar",color=Green,fontWeight=FontWeight.Bold)}},
+        dismissButton={TextButton(onClick=close){Text("Cancelar",color=Muted)}}
+    )
 }
 
 @Composable private fun BudgetLimitDialog(target:BudgetLimitTarget,save:(Double)->Unit,close:()->Unit){

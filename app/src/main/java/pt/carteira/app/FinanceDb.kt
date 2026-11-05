@@ -25,7 +25,7 @@ data class FinanceTransaction(
 )
 
 @Entity(tableName = "budgets")
-data class Budget(@PrimaryKey(autoGenerate = true) val id: Long = 0, val name: String, val category: String, val limitAmount: Double)
+data class Budget(@PrimaryKey(autoGenerate = true) val id: Long = 0, val name: String, val limitAmount: Double, val archivedFromMonth: Long? = null)
 
 @Entity(tableName = "categories", indices = [Index(value = ["name", "kind"], unique = true)])
 data class Category(@PrimaryKey(autoGenerate = true) val id: Long = 0, val name: String, val kind: String)
@@ -55,6 +55,7 @@ data class BudgetPeriod(val budgetId: Long, val monthStart: Long, val limitAmoun
     @Insert suspend fun addTransaction(value: FinanceTransaction)
     @Update suspend fun updateTransaction(value: FinanceTransaction)
     @Insert suspend fun addBudget(value: Budget): Long
+    @Update suspend fun updateBudget(value: Budget)
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun saveBudgetPeriod(value: BudgetPeriod)
     @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun addCategories(values: List<Category>)
     @Delete suspend fun deleteTransaction(value: FinanceTransaction)
@@ -62,7 +63,7 @@ data class BudgetPeriod(val budgetId: Long, val monthStart: Long, val limitAmoun
     @Query("SELECT COUNT(*) FROM accounts") suspend fun accountCount(): Int
 }
 
-@Database(entities = [Account::class, FinanceTransaction::class, Budget::class, Category::class, BudgetPeriod::class], version = 4, exportSchema = false)
+@Database(entities = [Account::class, FinanceTransaction::class, Budget::class, Category::class, BudgetPeriod::class], version = 6, exportSchema = false)
 abstract class FinanceDb : RoomDatabase() {
     abstract fun dao(): FinanceDao
     companion object {
@@ -99,9 +100,30 @@ abstract class FinanceDb : RoomDatabase() {
                 db.execSQL("INSERT OR IGNORE INTO budget_periods(budgetId, monthStart, limitAmount) SELECT id, ?, limitAmount FROM budgets", arrayOf(calendar.timeInMillis))
             }
         }
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE budgets ADD COLUMN archivedFromMonth INTEGER")
+            }
+        }
+        private val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Preserve monthly history while rebuilding budgets without its former category column.
+                db.execSQL("CREATE TABLE budget_periods_backup (budgetId INTEGER NOT NULL, monthStart INTEGER NOT NULL, limitAmount REAL NOT NULL, PRIMARY KEY(budgetId, monthStart))")
+                db.execSQL("INSERT INTO budget_periods_backup(budgetId, monthStart, limitAmount) SELECT budgetId, monthStart, limitAmount FROM budget_periods")
+                db.execSQL("DROP TABLE budget_periods")
+                db.execSQL("CREATE TABLE budgets_new (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, name TEXT NOT NULL, limitAmount REAL NOT NULL, archivedFromMonth INTEGER)")
+                db.execSQL("INSERT INTO budgets_new(id, name, limitAmount, archivedFromMonth) SELECT id, name, limitAmount, archivedFromMonth FROM budgets")
+                db.execSQL("DROP TABLE budgets")
+                db.execSQL("ALTER TABLE budgets_new RENAME TO budgets")
+                db.execSQL("CREATE TABLE budget_periods (budgetId INTEGER NOT NULL, monthStart INTEGER NOT NULL, limitAmount REAL NOT NULL, PRIMARY KEY(budgetId, monthStart), FOREIGN KEY(budgetId) REFERENCES budgets(id) ON UPDATE NO ACTION ON DELETE CASCADE)")
+                db.execSQL("CREATE INDEX index_budget_periods_budgetId ON budget_periods(budgetId)")
+                db.execSQL("INSERT INTO budget_periods(budgetId, monthStart, limitAmount) SELECT budgetId, monthStart, limitAmount FROM budget_periods_backup")
+                db.execSQL("DROP TABLE budget_periods_backup")
+            }
+        }
         fun get(context: Context): FinanceDb = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext, FinanceDb::class.java, "carteira.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                 .build().also { instance = it }
         }
     }
