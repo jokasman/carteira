@@ -84,7 +84,7 @@ class MainActivity : ComponentActivity() {
             "Orçamentos" -> BudgetsPage(Modifier.padding(pad), budgets, transactions, {dialog="orçamento"})
             else -> ReportsPage(Modifier.padding(pad), transactions)
         }
-    } }
+    }
     if(dialog.isNotEmpty()) when(dialog) {
         "movimento" -> TransactionDialog(accounts, { t,a,k,c,acc,r,n,dest -> model.addTransaction(t,a,k,c,acc,r,n,dest); dialog="" }, {dialog=""})
         "conta" -> SimpleDialog("Nova conta", listOf("Nome","Tipo"), listOf("","Carteira"), listOf("Carteira","Conta bancária","Cartão de crédito","Poupança"), {v->model.addAccount(v[0],v.getOrElse(1){"Conta"});dialog=""}, {dialog=""})
