@@ -16,6 +16,8 @@ Aplicação nativa Android de finanças pessoais, construída com Kotlin, Jetpac
 
 Abra esta pasta no Android Studio (Hedgehog ou posterior), aguarde a sincronização do Gradle e execute a configuração `app` num dispositivo/emulador Android 8.0 ou posterior. O projeto usa Android Gradle Plugin 8.7.3, Kotlin 2.0.21, Compose e Room.
 
+O workflow **Build Android APK** também compila o APK de depuração em cada push para `main` e pode ser iniciado manualmente no separador **Actions** do GitHub. Depois de concluído, descarrega o artifact `Carteira-APK` na página da execução.
+
 ## Limites desta versão
 
 Os dados permanecem no dispositivo. Sincronização bancária, conta online, partilha entre pessoas e exportação/importação requerem serviços e fluxos adicionais.
