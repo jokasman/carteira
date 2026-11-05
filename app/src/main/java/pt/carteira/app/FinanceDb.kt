@@ -27,22 +27,42 @@ data class FinanceTransaction(
 @Entity(tableName = "budgets")
 data class Budget(@PrimaryKey(autoGenerate = true) val id: Long = 0, val name: String, val category: String, val limitAmount: Double)
 
+@Entity(tableName = "categories", indices = [Index(value = ["name", "kind"], unique = true)])
+data class Category(@PrimaryKey(autoGenerate = true) val id: Long = 0, val name: String, val kind: String)
+
+@Entity(
+    tableName = "budget_periods",
+    primaryKeys = ["budgetId", "monthStart"],
+    foreignKeys = [ForeignKey(entity = Budget::class, parentColumns = ["id"], childColumns = ["budgetId"], onDelete = ForeignKey.CASCADE)],
+    indices = [Index(value = ["budgetId"])]
+)
+data class BudgetPeriod(val budgetId: Long, val monthStart: Long, val limitAmount: Double)
+
 @Dao interface FinanceDao {
     @Query("SELECT * FROM accounts ORDER BY id") fun accounts(): Flow<List<Account>>
     @Query("SELECT * FROM accounts WHERE id = :id LIMIT 1") suspend fun accountById(id: Long): Account?
     @Query("SELECT * FROM accounts ORDER BY id LIMIT 1") suspend fun firstAccount(): Account?
     @Query("SELECT * FROM transactions ORDER BY date DESC, id DESC") fun transactions(): Flow<List<FinanceTransaction>>
     @Query("SELECT * FROM budgets ORDER BY name") fun budgets(): Flow<List<Budget>>
+    @Query("SELECT * FROM budgets ORDER BY id") suspend fun allBudgets(): List<Budget>
     @Query("SELECT * FROM budgets WHERE id = :id LIMIT 1") suspend fun budgetById(id: Long): Budget?
+    @Query("SELECT * FROM budget_periods") fun budgetPeriods(): Flow<List<BudgetPeriod>>
+    @Query("SELECT * FROM budget_periods WHERE budgetId = :budgetId ORDER BY monthStart") suspend fun periodsForBudget(budgetId: Long): List<BudgetPeriod>
+    @Query("SELECT * FROM categories ORDER BY name") fun categories(): Flow<List<Category>>
+    @Query("SELECT EXISTS(SELECT 1 FROM categories WHERE name = :name AND kind = :kind)") suspend fun categoryExists(name: String, kind: String): Boolean
     @Insert suspend fun addAccount(value: Account): Long
+    @Update suspend fun updateAccount(value: Account)
     @Insert suspend fun addTransaction(value: FinanceTransaction)
-    @Insert suspend fun addBudget(value: Budget)
+    @Update suspend fun updateTransaction(value: FinanceTransaction)
+    @Insert suspend fun addBudget(value: Budget): Long
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun saveBudgetPeriod(value: BudgetPeriod)
+    @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun addCategories(values: List<Category>)
     @Delete suspend fun deleteTransaction(value: FinanceTransaction)
     @Delete suspend fun deleteBudget(value: Budget)
     @Query("SELECT COUNT(*) FROM accounts") suspend fun accountCount(): Int
 }
 
-@Database(entities = [Account::class, FinanceTransaction::class, Budget::class], version = 2, exportSchema = false)
+@Database(entities = [Account::class, FinanceTransaction::class, Budget::class, Category::class, BudgetPeriod::class], version = 4, exportSchema = false)
 abstract class FinanceDb : RoomDatabase() {
     abstract fun dao(): FinanceDao
     companion object {
@@ -52,10 +72,56 @@ abstract class FinanceDb : RoomDatabase() {
                 db.execSQL("ALTER TABLE transactions ADD COLUMN budgetId INTEGER")
             }
         }
+        private val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS categories (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL)")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_categories_name_kind ON categories(name, kind)")
+                DefaultCategoryOptions.forEach { (name, kind) ->
+                    db.execSQL("INSERT OR IGNORE INTO categories(name, kind) VALUES (?, ?)", arrayOf(name, kind))
+                }
+                db.execSQL("INSERT OR IGNORE INTO categories(name, kind) SELECT DISTINCT category, kind FROM transactions WHERE trim(category) <> ''")
+                db.execSQL("INSERT OR IGNORE INTO categories(name, kind) SELECT DISTINCT category, 'Despesa' FROM budgets WHERE trim(category) <> ''")
+                // Preserve existing expense history by associating it with a same-category budget when one exists.
+                db.execSQL("UPDATE transactions SET budgetId = (SELECT id FROM budgets WHERE lower(trim(budgets.category)) = lower(trim(transactions.category)) ORDER BY id LIMIT 1) WHERE kind = 'Despesa' AND budgetId IS NULL AND EXISTS (SELECT 1 FROM budgets WHERE lower(trim(budgets.category)) = lower(trim(transactions.category)))")
+            }
+        }
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS budget_periods (budgetId INTEGER NOT NULL, monthStart INTEGER NOT NULL, limitAmount REAL NOT NULL, PRIMARY KEY(budgetId, monthStart), FOREIGN KEY(budgetId) REFERENCES budgets(id) ON UPDATE NO ACTION ON DELETE CASCADE)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_budget_periods_budgetId ON budget_periods(budgetId)")
+                val calendar = java.util.Calendar.getInstance().apply {
+                    set(java.util.Calendar.DAY_OF_MONTH, 1)
+                    set(java.util.Calendar.HOUR_OF_DAY, 0)
+                    set(java.util.Calendar.MINUTE, 0)
+                    set(java.util.Calendar.SECOND, 0)
+                    set(java.util.Calendar.MILLISECOND, 0)
+                }
+                db.execSQL("INSERT OR IGNORE INTO budget_periods(budgetId, monthStart, limitAmount) SELECT id, ?, limitAmount FROM budgets", arrayOf(calendar.timeInMillis))
+            }
+        }
         fun get(context: Context): FinanceDb = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext, FinanceDb::class.java, "carteira.db")
-                .addMigrations(MIGRATION_1_2)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                 .build().also { instance = it }
         }
     }
 }
+
+val DefaultCategoryOptions = listOf(
+    "Alimentação" to "Despesa",
+    "Casa" to "Despesa",
+    "Transportes" to "Despesa",
+    "Saúde" to "Despesa",
+    "Lazer" to "Despesa",
+    "Compras" to "Despesa",
+    "Educação" to "Despesa",
+    "Serviços" to "Despesa",
+    "Outros" to "Despesa",
+    "Salário" to "Receita",
+    "Trabalho" to "Receita",
+    "Investimentos" to "Receita",
+    "Reembolsos" to "Receita",
+    "Outros rendimentos" to "Receita",
+    "Transferência" to "Transferência",
+    "Acerto de saldo" to "Ajuste"
+)
