@@ -9,7 +9,7 @@ import kotlinx.coroutines.flow.Flow
 @Entity(tableName = "accounts")
 data class Account(@PrimaryKey(autoGenerate = true) val id: Long = 0, val name: String, val type: String = "Conta", val openingBalance: Double = 0.0, val currency: String = "EUR")
 
-@Entity(tableName = "transactions")
+@Entity(tableName = "transactions", indices = [Index(value = ["importKey"], unique = true)])
 data class FinanceTransaction(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val title: String,
@@ -21,11 +21,20 @@ data class FinanceTransaction(
     val note: String = "",
     val recurring: Boolean = false,
     val toAccountId: Long? = null,
-    val budgetId: Long? = null
+    val budgetId: Long? = null,
+    val importKey: String? = null
 )
 
 @Entity(tableName = "budgets")
 data class Budget(@PrimaryKey(autoGenerate = true) val id: Long = 0, val name: String, val limitAmount: Double, val archivedFromMonth: Long? = null)
+
+@Entity(
+    tableName = "budget_rules",
+    primaryKeys = ["merchantKey"],
+    foreignKeys = [ForeignKey(entity = Budget::class, parentColumns = ["id"], childColumns = ["budgetId"], onDelete = ForeignKey.CASCADE)],
+    indices = [Index(value = ["budgetId"])]
+)
+data class BudgetRule(val merchantKey: String, val merchantLabel: String, val budgetId: Long)
 
 @Entity(tableName = "categories", indices = [Index(value = ["name", "kind"], unique = true)])
 data class Category(@PrimaryKey(autoGenerate = true) val id: Long = 0, val name: String, val kind: String)
@@ -47,15 +56,24 @@ data class BudgetPeriod(val budgetId: Long, val monthStart: Long, val limitAmoun
     @Query("SELECT * FROM budgets ORDER BY id") suspend fun allBudgets(): List<Budget>
     @Query("SELECT * FROM budgets WHERE id = :id LIMIT 1") suspend fun budgetById(id: Long): Budget?
     @Query("SELECT * FROM budget_periods") fun budgetPeriods(): Flow<List<BudgetPeriod>>
+    @Query("SELECT * FROM budget_rules") fun budgetRules(): Flow<List<BudgetRule>>
+    @Query("SELECT * FROM budget_rules") suspend fun allBudgetRules(): List<BudgetRule>
+    @Query("SELECT * FROM budget_rules WHERE merchantKey = :merchantKey LIMIT 1") suspend fun budgetRule(merchantKey: String): BudgetRule?
     @Query("SELECT * FROM budget_periods WHERE budgetId = :budgetId ORDER BY monthStart") suspend fun periodsForBudget(budgetId: Long): List<BudgetPeriod>
     @Query("SELECT * FROM categories ORDER BY name") fun categories(): Flow<List<Category>>
     @Query("SELECT EXISTS(SELECT 1 FROM categories WHERE name = :name AND kind = :kind)") suspend fun categoryExists(name: String, kind: String): Boolean
     @Insert suspend fun addAccount(value: Account): Long
     @Update suspend fun updateAccount(value: Account)
     @Insert suspend fun addTransaction(value: FinanceTransaction)
+    @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun importTransactions(values: List<FinanceTransaction>): List<Long>
     @Update suspend fun updateTransaction(value: FinanceTransaction)
+    @Transaction suspend fun saveTransactionAndRule(value: FinanceTransaction, rule: BudgetRule?) {
+        if (value.id == 0L) addTransaction(value) else updateTransaction(value)
+        if (rule != null) saveBudgetRule(rule)
+    }
     @Insert suspend fun addBudget(value: Budget): Long
     @Update suspend fun updateBudget(value: Budget)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun saveBudgetRule(value: BudgetRule)
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun saveBudgetPeriod(value: BudgetPeriod)
     @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun addCategories(values: List<Category>)
     @Delete suspend fun deleteTransaction(value: FinanceTransaction)
@@ -63,7 +81,7 @@ data class BudgetPeriod(val budgetId: Long, val monthStart: Long, val limitAmoun
     @Query("SELECT COUNT(*) FROM accounts") suspend fun accountCount(): Int
 }
 
-@Database(entities = [Account::class, FinanceTransaction::class, Budget::class, Category::class, BudgetPeriod::class], version = 6, exportSchema = false)
+@Database(entities = [Account::class, FinanceTransaction::class, Budget::class, Category::class, BudgetPeriod::class, BudgetRule::class], version = 7, exportSchema = false)
 abstract class FinanceDb : RoomDatabase() {
     abstract fun dao(): FinanceDao
     companion object {
@@ -121,9 +139,17 @@ abstract class FinanceDb : RoomDatabase() {
                 db.execSQL("DROP TABLE budget_periods_backup")
             }
         }
+        private val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE transactions ADD COLUMN importKey TEXT")
+                db.execSQL("CREATE UNIQUE INDEX index_transactions_importKey ON transactions(importKey)")
+                db.execSQL("CREATE TABLE budget_rules (merchantKey TEXT NOT NULL, merchantLabel TEXT NOT NULL, budgetId INTEGER NOT NULL, PRIMARY KEY(merchantKey), FOREIGN KEY(budgetId) REFERENCES budgets(id) ON UPDATE NO ACTION ON DELETE CASCADE)")
+                db.execSQL("CREATE INDEX index_budget_rules_budgetId ON budget_rules(budgetId)")
+            }
+        }
         fun get(context: Context): FinanceDb = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext, FinanceDb::class.java, "carteira.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
                 .build().also { instance = it }
         }
     }

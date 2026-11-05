@@ -1,8 +1,10 @@
 package pt.carteira.app
 
 import android.os.Bundle
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.*
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
@@ -19,6 +21,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.KeyboardType
@@ -29,8 +32,10 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.math.BigDecimal
@@ -53,6 +58,7 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
     val budgets = dao.budgets().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     val categories = dao.categories().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     val budgetPeriods = dao.budgetPeriods().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    val budgetRules = dao.budgetRules().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     init {
         viewModelScope.launch {
             ensureDefaultAccount()
@@ -88,33 +94,79 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
             if(account.id==0L) dao.addAccount(account) else dao.updateAccount(account)
         }
     }
-    fun saveTransaction(value: FinanceTransaction, onComplete:(Boolean)->Unit = {}) = viewModelScope.launch {
+    fun saveTransaction(value: FinanceTransaction, rememberBudgetRule:Boolean=false, onComplete:(Boolean)->Unit = {}) = viewModelScope.launch {
         val saved = try {
             val source = dao.accountById(value.accountId) ?: ensureDefaultAccount()
-            val budget = value.budgetId?.let { dao.budgetById(it) }
-            val validBudget = when (value.kind) {
+            val ruleKey=normalizeMovementKey(value.title)
+            val matchedBudget=if(value.kind=="Despesa"&&value.budgetId==null&&ruleKey.isNotBlank()) dao.budgetRule(ruleKey)?.let{rule->dao.budgetById(rule.budgetId)} else null
+            val candidate=if(matchedBudget!=null&&budgetVisibleInMonth(matchedBudget,currentMonthStart(value.date))) value.copy(budgetId=matchedBudget.id) else value
+            val budget = candidate.budgetId?.let { dao.budgetById(it) }
+            val validBudget = when (candidate.kind) {
                 "Despesa" -> budget != null
-                else -> value.budgetId == null
+                else -> candidate.budgetId == null
             }
-            val validDestination = value.kind != "Transferência" ||
-                (value.toAccountId != null && value.toAccountId != source.id && dao.accountById(value.toAccountId) != null)
-            val validAmount=value.amount.isFinite() && (if(value.kind=="Ajuste") kotlin.math.abs(value.amount)>=0.01 else value.amount>=0.01)
-            if (value.kind !in listOf("Despesa", "Receita", "Transferência", "Ajuste") ||
+            val validDestination = candidate.kind != "Transferência" ||
+                (candidate.toAccountId != null && candidate.toAccountId != source.id && dao.accountById(candidate.toAccountId) != null)
+            val validAmount=candidate.amount.isFinite() && (if(candidate.kind=="Ajuste") kotlin.math.abs(candidate.amount)>=0.01 else candidate.amount>=0.01)
+            if (candidate.kind !in listOf("Despesa", "Receita", "Transferência", "Ajuste") ||
                 !validAmount ||
-                value.category.isBlank() || !dao.categoryExists(value.category, value.kind) ||
+                candidate.category.isBlank() || !dao.categoryExists(candidate.category, candidate.kind) ||
                 !validBudget || !validDestination) false
             else {
-                val normalized = value.copy(
-                    title = value.title.trim(),
-                    amount = BigDecimal.valueOf(value.amount).setScale(2, RoundingMode.HALF_UP).toDouble(),
+                val normalized = candidate.copy(
+                    title = candidate.title.trim(),
+                    amount = BigDecimal.valueOf(candidate.amount).setScale(2, RoundingMode.HALF_UP).toDouble(),
                     accountId = source.id,
-                    note = value.note.trim()
+                    note = candidate.note.trim()
                 )
-                if (normalized.id == 0L) dao.addTransaction(normalized) else dao.updateTransaction(normalized)
+                val rule=if(rememberBudgetRule&&normalized.kind=="Despesa"&&normalized.budgetId!=null&&ruleKey.isNotBlank())
+                    BudgetRule(ruleKey,normalized.title,normalized.budgetId) else null
+                dao.saveTransactionAndRule(normalized,rule)
                 true
             }
         } catch (cancelled: CancellationException) { throw cancelled } catch (_: Exception) { false }
         onComplete(saved)
+    }
+    fun importCsv(accountId:Long,csv:ParsedBankCsv,onComplete:(CsvImportResult?,String?)->Unit)=viewModelScope.launch {
+        try {
+            if(dao.accountById(accountId)==null) error("Seleciona uma conta válida para importar os movimentos.")
+            val rules=dao.allBudgetRules().associateBy{it.merchantKey}
+            val allBudgets=dao.allBudgets().associateBy{it.id}
+            val importedRows=csv.movements.map{movement->
+                val expense=movement.signedAmount<0
+                val key=normalizeMovementKey(movement.description)
+                val rule=if(expense)rules[key] else null
+                val budget=rule?.let{allBudgets[it.budgetId]}
+                val budgetId=budget?.takeIf{budgetVisibleInMonth(it,currentMonthStart(movement.date))}?.id
+                val amount=BigDecimal.valueOf(kotlin.math.abs(movement.signedAmount)).setScale(2,RoundingMode.HALF_UP).toDouble()
+                val importKey=csvImportKey(accountId,movement,key)
+                FinanceTransaction(
+                    title=movement.description,
+                    amount=amount,
+                    kind=if(expense)"Despesa" else "Receita",
+                    category=if(expense)"Outros" else "Outros rendimentos",
+                    accountId=accountId,
+                    date=movement.date,
+                    budgetId=budgetId,
+                    importKey=importKey
+                )
+            }
+            val results=if(importedRows.isEmpty()) emptyList() else dao.importTransactions(importedRows)
+            val importedIndices=results.indices.filter{results[it]>=0L}
+            val result=CsvImportResult(
+                imported=importedIndices.size,
+                duplicates=results.count{it<0L},
+                unassignedExpenses=importedIndices.count{importedRows[it].kind=="Despesa"&&importedRows[it].budgetId==null},
+                skippedRows=csv.skippedRows
+            )
+            onComplete(result,null)
+        } catch(cancelled:CancellationException){throw cancelled}
+        catch(error:Exception){onComplete(null,error.message?:"Não foi possível importar o CSV.")}
+    }
+    private fun csvImportKey(accountId:Long,movement:BankCsvMovement,merchantKey:String):String {
+        val identity="$accountId|${movement.date}|$merchantKey|${movement.signedAmount}|${movement.balance ?: ""}|${movement.occurrence}"
+        val digest=java.security.MessageDigest.getInstance("SHA-256").digest(identity.toByteArray(Charsets.UTF_8))
+        return digest.joinToString(""){byte->"%02x".format(byte.toInt() and 0xff)}
     }
     fun addBudget(name:String, amount:Double) = viewModelScope.launch {
         if(name.isNotBlank() && amount.isFinite() && amount>=0.01) {
@@ -155,6 +207,9 @@ class MainActivity : ComponentActivity() {
 
 @Composable private fun CarteiraApp(model: FinanceModel) {
     val accounts by model.accounts.collectAsState(); val transactions by model.transactions.collectAsState(); val budgets by model.budgets.collectAsState(); val categories by model.categories.collectAsState(); val budgetPeriods by model.budgetPeriods.collectAsState()
+    val budgetRules by model.budgetRules.collectAsState()
+    val context=LocalContext.current
+    val coroutineScope=rememberCoroutineScope()
     var section by remember { mutableStateOf("Início") }; var dialog by remember { mutableStateOf("") }
     var pendingDelete by remember { mutableStateOf<FinanceTransaction?>(null) }
     var pendingEdit by remember { mutableStateOf<FinanceTransaction?>(null) }
@@ -168,6 +223,27 @@ class MainActivity : ComponentActivity() {
     var selectedBudgetMonth by remember { mutableLongStateOf(currentMonthStart()) }
     var budgetSort by remember { mutableStateOf("Maior gasto") }
     var showBudgetRemaining by remember { mutableStateOf(false) }
+    var pendingCsvImport by remember { mutableStateOf<ParsedBankCsv?>(null) }
+    var csvImportAccountId by remember { mutableLongStateOf(0L) }
+    var csvImportError by remember { mutableStateOf<String?>(null) }
+    var csvImportResult by remember { mutableStateOf<CsvImportResult?>(null) }
+    var csvImporting by remember { mutableStateOf(false) }
+    val csvPicker=rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()){uri->
+        if(uri!=null) coroutineScope.launch {
+            try {
+                val parsed=withContext(Dispatchers.IO){
+                    val bytes=context.contentResolver.openInputStream(uri)?.use{it.readBytes()}?:error("Não foi possível abrir o ficheiro selecionado.")
+                    if(bytes.size>15*1024*1024) error("O CSV é demasiado grande para importar (limite: 15 MB).")
+                    parseMillenniumCsv(bytes)
+                }
+                pendingCsvImport=parsed
+                csvImportAccountId=accounts.firstOrNull()?.id?:0L
+                csvImportError=null
+            } catch(cancelled:CancellationException){throw cancelled}
+            catch(error:Exception){csvImportError=error.message?:"Não foi possível ler o CSV."}
+        }
+    }
+    fun openCsvPicker(){csvImportError=null;csvPicker.launch(arrayOf("text/csv","text/comma-separated-values","application/vnd.ms-excel","text/plain","*/*"))}
     fun addMovement(budgetId: Long? = null) { pendingEdit = null; movementBudgetId = budgetId; dialog = "movimento" }
     fun editMovement(value: FinanceTransaction) { pendingEdit = value; movementBudgetId = null; dialog = "movimento" }
     val activeBudget = budgets.firstOrNull { it.id == activeBudgetId }
@@ -186,7 +262,7 @@ class MainActivity : ComponentActivity() {
     } }, floatingActionButton={ if(section in listOf("Movimentos","Orçamentos","Contas")||(section=="DetalheOrçamento"&&canAddBudgetMovement)) FloatingActionButton(onClick={when(section){"Orçamentos"->{pendingEdit=null;dialog="orçamento"};"Contas"->dialog="conta";"DetalheOrçamento"->addMovement(activeBudgetId);else->addMovement()}},containerColor=Green,contentColor=Color.White){Icon(Icons.Default.Add,"Adicionar")} }) { pad ->
         when(section) {
             "Início" -> HomePage(Modifier.padding(pad), total, transactions, accounts, budgets, budgetPeriods, {section=it}, {pendingDelete=it}, {editMovement(it)}, {addMovement()}, {budget->activeBudgetId=budget.id;selectedBudgetMonth=currentMonthStart();section="DetalheOrçamento"})
-            "Movimentos" -> TransactionsPage(Modifier.padding(pad), transactions, accounts, {pendingDelete=it}, {editMovement(it)}, {addMovement()})
+            "Movimentos" -> TransactionsPage(Modifier.padding(pad), transactions, accounts, budgets, {pendingDelete=it}, {editMovement(it)}, {addMovement()}, {openCsvPicker()})
             "Contas" -> AccountsPage(Modifier.padding(pad), accounts, transactions, {pendingAccountEdit=null;dialog="conta"}, {pendingAccountEdit=it;dialog="editar-conta"})
             "Orçamentos" -> BudgetsPage(Modifier.padding(pad), budgets, transactions, budgetPeriods, selectedBudgetMonth, {selectedBudgetMonth=it}, budgetSort, {budgetSort=it}, showBudgetRemaining, {showBudgetRemaining=it}, {pendingBudgetLimit=null;pendingBudgetEdit=null;dialog="orçamento"}, {budget->addMovement(budget.id)}, {budget->activeBudgetId=budget.id;section="DetalheOrçamento"})
             "DetalheOrçamento" -> BudgetDetailPage(Modifier.padding(pad), activeBudget, transactions, accounts, budgetPeriods, selectedBudgetMonth, {selectedBudgetMonth=it}, {addMovement(activeBudget?.id)}, {pendingDelete=it}, {editMovement(it)}, {budget,monthStart,amount->pendingBudgetLimit=BudgetLimitTarget(budget.id,monthStart,amount);dialog="budget-limit"}, {budget->pendingBudgetEdit=budget;dialog="editar-orçamento"}, {budget->pendingBudgetArchive=budget})
@@ -194,12 +270,12 @@ class MainActivity : ComponentActivity() {
         }
     }
     if(dialog.isNotEmpty()) when(dialog) {
-        "movimento" -> TransactionDialog(accounts, budgets, categories, budgets.firstOrNull{it.id==movementBudgetId}, pendingEdit, { value, done -> model.saveTransaction(value, done) }, { pendingEdit=null;dialog="";movementBudgetId=null }, { pendingEdit=null;movementBudgetId=null;dialog="orçamento" })
+        "movimento" -> TransactionDialog(accounts, budgets, categories, budgetRules, budgets.firstOrNull{it.id==movementBudgetId}, pendingEdit, { value,rememberRule,done -> model.saveTransaction(value,rememberRule,done) }, { pendingEdit=null;dialog="";movementBudgetId=null }, { pendingEdit=null;movementBudgetId=null;dialog="orçamento" })
         "conta" -> AccountDialog(null,0.0, {value->model.saveAccount(value);dialog=""}, {dialog=""}, {})
         "editar-conta" -> AccountDialog(pendingAccountEdit, pendingAccountEdit?.let{accountBalance(it,transactions)}?:0.0, {value->model.saveAccount(value);pendingAccountEdit=null;dialog=""}, {pendingAccountEdit=null;dialog=""}, {account->adjustmentAccount=account;pendingAccountEdit=null;dialog="acerto-conta"})
         "orçamento" -> BudgetDialog(null,500.0,{name,limit->model.addBudget(name,limit);dialog=""},{dialog=""})
         "editar-orçamento" -> pendingBudgetEdit?.let{budget->BudgetDialog(budget,budgetLimitFor(budget,budgetPeriods,selectedBudgetMonth),{name,_->model.updateBudgetName(budget.copy(name=name));pendingBudgetEdit=null;dialog=""},{pendingBudgetEdit=null;dialog=""})}
-        "acerto-conta" -> adjustmentAccount?.let{account->AdjustmentDialog(account,accountBalance(account,transactions),{amount,decrease,note,done->model.saveTransaction(FinanceTransaction(title="Acerto de saldo",amount=if(decrease)-amount else amount,kind="Ajuste",category="Acerto de saldo",accountId=account.id,note=note),done)},{adjustmentAccount=null;dialog=""})}
+        "acerto-conta" -> adjustmentAccount?.let{account->AdjustmentDialog(account,accountBalance(account,transactions),{amount,decrease,note,done->model.saveTransaction(FinanceTransaction(title="Acerto de saldo",amount=if(decrease)-amount else amount,kind="Ajuste",category="Acerto de saldo",accountId=account.id,note=note),false,done)},{adjustmentAccount=null;dialog=""})}
         "budget-limit" -> pendingBudgetLimit?.let{target->BudgetLimitDialog(target,{amount->model.setBudgetLimit(target.budgetId,target.monthStart,amount);pendingBudgetLimit=null;dialog=""},{pendingBudgetLimit=null;dialog=""})}
     }
     pendingDelete?.let { transaction ->
@@ -220,6 +296,26 @@ class MainActivity : ComponentActivity() {
             dismissButton={TextButton(onClick={pendingBudgetArchive=null}){Text("Cancelar",color=Green)}}
         )
     }
+    pendingCsvImport?.let{parsed->
+        CsvImportDialog(parsed,accounts,csvImportAccountId,csvImporting,{csvImportAccountId=it},{
+            csvImporting=true
+            model.importCsv(csvImportAccountId,parsed){result,error->
+                csvImporting=false
+                if(error!=null) csvImportError=error else {pendingCsvImport=null;csvImportResult=result}
+            }
+        },{if(!csvImporting)pendingCsvImport=null})
+    }
+    csvImportError?.let{message->
+        AlertDialog(onDismissRequest={csvImportError=null},title={Text("Importar CSV",color=Ink,fontWeight=FontWeight.Bold)},text={Text(message,color=Muted)},confirmButton={TextButton(onClick={csvImportError=null}){Text("OK",color=Green)}})
+    }
+    csvImportResult?.let{result->
+        AlertDialog(
+            onDismissRequest={csvImportResult=null},
+            title={Text("Importação concluída",color=Ink,fontWeight=FontWeight.Bold)},
+            text={Text("${result.imported} movimentos importados. ${result.duplicates} duplicados ignorados. ${result.unassignedExpenses} despesas ficaram sem orçamento para poderes revê-las no filtro correspondente.${if(result.skippedRows>0)" ${result.skippedRows} linhas inválidas foram ignoradas." else ""}",color=Muted)},
+            confirmButton={TextButton(onClick={csvImportResult=null;section="Movimentos"}){Text("Ver movimentos",color=Green)}}
+        )
+    }
 }
 
 @Composable private fun HomePage(modifier:Modifier,total:Double,tx:List<FinanceTransaction>,accounts:List<Account>,budgets:List<Budget>,budgetPeriods:List<BudgetPeriod>,navigate:(String)->Unit,requestDelete:(FinanceTransaction)->Unit,requestEdit:(FinanceTransaction)->Unit,addMovement:()->Unit,openBudget:(Budget)->Unit) {
@@ -236,7 +332,7 @@ class MainActivity : ComponentActivity() {
         else items(activeBudgets.take(3)) { b -> BudgetRow(b, tx, budgetPeriods, currentMonthStart()) { openBudget(b) } }
         item { SectionTitle("Movimentos recentes", "Ver todos", {navigate("Movimentos")}) }
         if(tx.isEmpty()) item { EmptyCard("Tudo começa aqui", "Regista a tua primeira receita ou despesa.", "Adicionar movimento", addMovement) }
-        else items(tx.take(5)) { TransactionRow(it,accounts,requestDelete,requestEdit) }
+        else items(tx.take(5)) { TransactionRow(it,accounts,requestDelete,requestEdit,budgets) }
     }
 }
 
@@ -254,15 +350,45 @@ class MainActivity : ComponentActivity() {
 @Composable private fun AccountMini(account:Account,tx:List<FinanceTransaction>){val balance=accountBalance(account,tx);Column(Modifier.widthIn(min=112.dp).background(Color.White,RoundedCornerShape(18.dp)).padding(14.dp)){Icon(if(account.type=="Carteira")Icons.Default.Payments else Icons.Default.AccountBalance, null,tint=Green);Text(account.name,style=MaterialTheme.typography.labelMedium,color=Muted,modifier=Modifier.padding(top=10.dp));Text(money(balance),fontWeight=FontWeight.Bold,color=Ink)} }
 @Composable private fun AddMini(onClick:()->Unit){Column(Modifier.width(78.dp).height(108.dp).border(1.dp,Color(0xFFDCE5DF),RoundedCornerShape(18.dp)).clickable(onClick=onClick).padding(12.dp),verticalArrangement=Arrangement.Center,horizontalAlignment=Alignment.CenterHorizontally){Icon(Icons.Default.Add,null,tint=Green);Text("Nova",color=Muted,style=MaterialTheme.typography.labelSmall)} }
 
-@Composable private fun TransactionsPage(modifier:Modifier,tx:List<FinanceTransaction>,accounts:List<Account>,requestDelete:(FinanceTransaction)->Unit,requestEdit:(FinanceTransaction)->Unit,addMovement:()->Unit){
-    var filter by remember{mutableStateOf("Todos")}; val filtered=tx.filter{filter=="Todos"||it.kind==filter}
-    Column(modifier.fillMaxSize().padding(horizontal=20.dp)){
-        Text("Toca num movimento para editar; mantém premido para apagar.",color=Muted,style=MaterialTheme.typography.labelSmall,modifier=Modifier.padding(bottom=8.dp))
-        Row(horizontalArrangement=Arrangement.spacedBy(8.dp),modifier=Modifier.horizontalScroll(rememberScrollState()).padding(bottom=12.dp)){
-            listOf("Todos","Despesa","Receita","Transferência","Ajuste").forEach{AssistChip(onClick={filter=it},label={Text(it)},colors=AssistChipDefaults.assistChipColors(containerColor=if(filter==it)Mint else Color.White))}
+@Composable private fun TransactionsPage(modifier:Modifier,tx:List<FinanceTransaction>,accounts:List<Account>,budgets:List<Budget>,requestDelete:(FinanceTransaction)->Unit,requestEdit:(FinanceTransaction)->Unit,addMovement:()->Unit,importCsv:()->Unit){
+    var kindFilter by remember{mutableStateOf("Todos")}
+    var budgetFilter by remember{mutableStateOf("Todos")}
+    var sort by remember{mutableStateOf("Mais recentes")}
+    var sortExpanded by remember{mutableStateOf(false)}
+    val filtered=tx.filter{transaction->
+        val typeMatches=kindFilter=="Todos"||transaction.kind==kindFilter
+        val budgetMatches=when(budgetFilter){
+            "Sem orçamento"->transaction.kind=="Despesa"&&transaction.budgetId==null
+            "Com orçamento"->transaction.kind=="Despesa"&&transaction.budgetId!=null
+            else->true
         }
-        if(filtered.isEmpty()) EmptyCard(if(tx.isEmpty())"Sem movimentos" else "Sem resultados",if(tx.isEmpty())"Adiciona receitas, despesas ou transferências." else "Não há movimentos deste tipo.","Novo movimento",addMovement)
-        else LazyColumn(verticalArrangement=Arrangement.spacedBy(9.dp)){items(filtered){TransactionRow(it,accounts,requestDelete,requestEdit)}}
+        typeMatches&&budgetMatches
+    }.let{list->when(sort){
+        "Mais antigos"->list.sortedWith(compareBy<FinanceTransaction>{it.date}.thenBy{it.id})
+        "Maior valor"->list.sortedWith(compareByDescending<FinanceTransaction>{kotlin.math.abs(it.amount)}.thenByDescending{it.date})
+        "Menor valor"->list.sortedWith(compareBy<FinanceTransaction>{kotlin.math.abs(it.amount)}.thenByDescending{it.date})
+        else->list.sortedWith(compareByDescending<FinanceTransaction>{it.date}.thenByDescending{it.id})
+    }}
+    Column(modifier.fillMaxSize().padding(horizontal=16.dp)){
+        Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){
+            Text("Filtrar e ordenar movimentos",Modifier.weight(1f),color=Muted,style=MaterialTheme.typography.labelSmall)
+            TextButton(onClick=importCsv){Icon(Icons.Default.FileOpen,null,tint=Green);Spacer(Modifier.width(4.dp));Text("Importar CSV",color=Green)}
+        }
+        Row(horizontalArrangement=Arrangement.spacedBy(7.dp),modifier=Modifier.horizontalScroll(rememberScrollState()).padding(bottom=4.dp)){
+            listOf("Todos","Despesa","Receita","Transferência","Ajuste").forEach{option->AssistChip(onClick={kindFilter=option},label={Text(option)},colors=AssistChipDefaults.assistChipColors(containerColor=if(kindFilter==option)Mint else Color.White))}
+        }
+        Row(horizontalArrangement=Arrangement.spacedBy(7.dp),modifier=Modifier.horizontalScroll(rememberScrollState()).padding(bottom=5.dp)){
+            listOf("Todos","Com orçamento","Sem orçamento").forEach{option->AssistChip(onClick={budgetFilter=option},label={Text(option)},colors=AssistChipDefaults.assistChipColors(containerColor=if(budgetFilter==option)Mint else Color.White))}
+        }
+        Box(Modifier.align(Alignment.End)){
+            TextButton(onClick={sortExpanded=true}){Icon(Icons.Default.Sort,null,tint=Green);Spacer(Modifier.width(5.dp));Text(sort,color=Green)}
+            DropdownMenu(expanded=sortExpanded,onDismissRequest={sortExpanded=false}){
+                listOf("Mais recentes","Mais antigos","Maior valor","Menor valor").forEach{option->DropdownMenuItem(text={Text(option)},onClick={sort=option;sortExpanded=false})}
+            }
+        }
+        Text("${filtered.size} movimentos",color=Muted,style=MaterialTheme.typography.labelSmall,modifier=Modifier.padding(bottom=8.dp))
+        if(filtered.isEmpty()) EmptyCard(if(tx.isEmpty())"Sem movimentos" else "Sem resultados",if(tx.isEmpty())"Importa o extrato CSV ou adiciona movimentos manualmente." else "Não há movimentos com estes filtros.","Novo movimento",addMovement)
+        else LazyColumn(verticalArrangement=Arrangement.spacedBy(9.dp)){items(filtered,key={it.id}){TransactionRow(it,accounts,requestDelete,requestEdit,budgets)}}
     }
 }
 @Composable private fun AccountsPage(modifier:Modifier,accounts:List<Account>,tx:List<FinanceTransaction>,add:()->Unit,edit:(Account)->Unit){Column(modifier.fillMaxSize().padding(20.dp)){Row(verticalAlignment=Alignment.CenterVertically){Text("Contas e carteiras",Modifier.weight(1f),style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold,color=Ink);TextButton(onClick=add){Text("+ Adicionar")}};Spacer(Modifier.height(8.dp));accounts.forEach{account->AccountDetail(account,tx){edit(account)};Spacer(Modifier.height(10.dp))}}}
@@ -376,7 +502,7 @@ class MainActivity : ComponentActivity() {
         if(records.isEmpty()) {
             if(canAdd) EmptyCard("Ainda sem registos","As despesas associadas a este orçamento aparecem aqui.","Adicionar movimento",add)
             else Text("Sem registos neste mês.",color=Muted,modifier=Modifier.padding(vertical=16.dp))
-        } else LazyColumn(Modifier.weight(1f),verticalArrangement=Arrangement.spacedBy(8.dp)){items(records,key={it.id}){TransactionRow(it,accounts,requestDelete,requestEdit)}}
+        } else LazyColumn(Modifier.weight(1f),verticalArrangement=Arrangement.spacedBy(8.dp)){items(records,key={it.id}){TransactionRow(it,accounts,requestDelete,requestEdit,listOf(budget))}}
         if(canAdd) Button(onClick=add,modifier=Modifier.fillMaxWidth().padding(vertical=10.dp)){Icon(Icons.Default.Add,null);Spacer(Modifier.width(8.dp));Text("Adicionar movimento")}
     }
 }
@@ -395,14 +521,15 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
 @Composable private fun ReportTile(label:String,value:Double,color:Color,modifier:Modifier){Column(modifier.background(Color.White,RoundedCornerShape(18.dp)).padding(16.dp)){Text(label,color=Muted);Text(money(value),color=color,style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold)} }
 
 @OptIn(ExperimentalFoundationApi::class)
-@Composable private fun TransactionRow(t:FinanceTransaction,accounts:List<Account>,delete:(FinanceTransaction)->Unit,edit:(FinanceTransaction)->Unit){
+@Composable private fun TransactionRow(t:FinanceTransaction,accounts:List<Account>,delete:(FinanceTransaction)->Unit,edit:(FinanceTransaction)->Unit,budgets:List<Budget> = emptyList()){
     val expense=t.kind=="Despesa"||t.kind=="Transferência"||(t.kind=="Ajuste"&&t.amount<0); val color=if(expense)Coral else Green
     val account=accounts.firstOrNull{it.id==t.accountId}?.name?:"Conta"; val dest=accounts.firstOrNull{it.id==t.toAccountId}?.name
+    val budgetLabel=if(t.kind=="Despesa")if(t.budgetId==null)"Sem orçamento" else budgets.firstOrNull{it.id==t.budgetId}?.name?:"Orçamento" else null
     Row(Modifier.fillMaxWidth().background(Color.White,RoundedCornerShape(17.dp)).combinedClickable(onClick={edit(t)},onLongClick={delete(t)}).padding(14.dp),verticalAlignment=Alignment.CenterVertically){
         Box(Modifier.size(42.dp).background(if(expense)Color(0xFFFFEFEC) else Mint,CircleShape),contentAlignment=Alignment.Center){Icon(if(t.kind=="Transferência")Icons.Default.SwapHoriz else if(expense)Icons.Default.ArrowUpward else Icons.Default.ArrowDownward,null,tint=color,modifier=Modifier.size(20.dp))}
         Column(Modifier.weight(1f).padding(horizontal=12.dp)){
             Text(t.title.ifBlank{t.category},color=Ink,fontWeight=FontWeight.SemiBold)
-            Text("${t.category} · $account${dest?.let{" → $it"}?:""}${if(t.recurring)" · Recorrente" else ""}",color=Muted,style=MaterialTheme.typography.labelSmall)
+            Text("${t.category} · $account${dest?.let{" → $it"}?:""}${budgetLabel?.let{" · $it"}?:""}${if(t.recurring)" · Recorrente" else ""}",color=if(t.kind=="Despesa"&&t.budgetId==null)Coral else Muted,style=MaterialTheme.typography.labelSmall,maxLines=1)
         }
         Column(horizontalAlignment=Alignment.End){Text("${if(expense)"−" else "+"}${money(kotlin.math.abs(t.amount))}",color=color,fontWeight=FontWeight.Bold);Text(SimpleDateFormat("dd MMM",Locale("pt","PT")).format(Date(t.date)),color=Muted,style=MaterialTheme.typography.labelSmall)}
     }
@@ -411,8 +538,8 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun TransactionDialog(
-    accounts:List<Account>, budgets:List<Budget>, categories:List<Category>, pinnedBudget:Budget?, initial:FinanceTransaction?,
-    save:(FinanceTransaction,(Boolean)->Unit)->Unit, close:()->Unit, createBudget:()->Unit
+    accounts:List<Account>, budgets:List<Budget>, categories:List<Category>, budgetRules:List<BudgetRule>,pinnedBudget:Budget?, initial:FinanceTransaction?,
+    save:(FinanceTransaction,Boolean,(Boolean)->Unit)->Unit, close:()->Unit, createBudget:()->Unit
 ){
     val movementId=initial?.id?:0L
     var title by remember(movementId){mutableStateOf(initial?.title.orEmpty())}
@@ -425,6 +552,8 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
     var accountId by remember(movementId){mutableLongStateOf(initial?.accountId?:accounts.firstOrNull()?.id?:0L)}
     var destinationId by remember(movementId){mutableLongStateOf(initial?.toAccountId?:accounts.firstOrNull{it.id!=accountId}?.id?:accountId)}
     var budgetId by remember(movementId,pinnedBudget?.id){mutableLongStateOf(initial?.budgetId?:pinnedBudget?.id?:0L)}
+    var manuallySelectedBudget by remember(movementId,pinnedBudget?.id){mutableStateOf(initial?.budgetId!=null||pinnedBudget!=null)}
+    var rememberBudgetRule by remember(movementId){mutableStateOf(initial?.importKey!=null&&initial.budgetId==null)}
     var accountMenu by remember{mutableStateOf(false)}; var destinationMenu by remember{mutableStateOf(false)}
     var budgetMenu by remember{mutableStateOf(false)}; var categoryMenu by remember{mutableStateOf(false)}
     var error by remember{mutableStateOf("")}; var saving by remember{mutableStateOf(false)}
@@ -437,11 +566,15 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
         if(accounts.none{it.id==accountId}) accountId=accounts.firstOrNull()?.id?:0L
         if(accounts.none{it.id==destinationId&&it.id!=accountId}) destinationId=accounts.firstOrNull{it.id!=accountId}?.id?:accountId
     }
-    LaunchedEffect(kind,budgets,categories,pinnedBudget?.id){
+    LaunchedEffect(kind,budgets,categories,pinnedBudget?.id,title,budgetRules){
         if(categoryName !in availableCategories) categoryName=availableCategories.firstOrNull().orEmpty()
         if(kind=="Despesa"){
-            val budget=if(pinnedBudget!=null)pinnedBudget else availableBudgets.firstOrNull{it.id==budgetId}
-            if(budget==null) budgetId=0L else budgetId=budget.id
+            if(pinnedBudget!=null){budgetId=pinnedBudget.id;manuallySelectedBudget=true}
+            else if(!manuallySelectedBudget){
+                val key=normalizeMovementKey(title)
+                val suggested=budgetRules.firstOrNull{it.merchantKey==key}?.budgetId
+                budgetId=availableBudgets.firstOrNull{it.id==suggested}?.id?:0L
+            } else if(availableBudgets.none{it.id==budgetId}) budgetId=0L
         } else budgetId=0L
     }
     AlertDialog(
@@ -470,8 +603,9 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
                     TextButton(onClick=createBudget){Text("Criar orçamento mensal",color=Green)}
                 } else ExposedDropdownMenuBox(expanded=budgetMenu,onExpandedChange={budgetMenu=!budgetMenu}){
                     OutlinedTextField(selectedBudget?.name.orEmpty(),{},readOnly=true,label={Text("Orçamento obrigatório")},placeholder={Text("Selecionar orçamento")},modifier=Modifier.menuAnchor().fillMaxWidth(),trailingIcon={ExposedDropdownMenuDefaults.TrailingIcon(expanded=budgetMenu)})
-                    ExposedDropdownMenu(expanded=budgetMenu,onDismissRequest={budgetMenu=false}){availableBudgets.forEach{item->DropdownMenuItem(text={Text(item.name)},onClick={budgetId=item.id;budgetMenu=false})}}
+                    ExposedDropdownMenu(expanded=budgetMenu,onDismissRequest={budgetMenu=false}){availableBudgets.forEach{item->DropdownMenuItem(text={Text(item.name)},onClick={budgetId=item.id;manuallySelectedBudget=true;budgetMenu=false})}}
                 }
+                if(selectedBudget!=null&&normalizeMovementKey(title).isNotBlank()) Row(verticalAlignment=Alignment.CenterVertically){Checkbox(rememberBudgetRule,{rememberBudgetRule=it});Text("Usar este orçamento em movimentos futuros com o mesmo descritivo",color=Muted,style=MaterialTheme.typography.bodySmall)}
             } else {
                 ExposedDropdownMenuBox(expanded=categoryMenu,onExpandedChange={categoryMenu=availableCategories.isNotEmpty()&&!categoryMenu}){
                     OutlinedTextField(categoryName,{},readOnly=true,label={Text("Categoria")},modifier=Modifier.menuAnchor().fillMaxWidth(),trailingIcon={ExposedDropdownMenuDefaults.TrailingIcon(expanded=categoryMenu)})
@@ -506,7 +640,7 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
                         recurring=recurring,note=note,toAccountId=if(kind=="Transferência")destinationId else null,
                         budgetId=if(kind=="Despesa")selectedBudget?.id else null
                     )
-                    save(value){success->saving=false;if(success)close() else error="Não foi possível guardar. Confirma a categoria, o orçamento e as contas."
+                    save(value,rememberBudgetRule){success->saving=false;if(success)close() else error="Não foi possível guardar. Confirma a categoria, o orçamento e as contas."
                     }
                 }
             }
@@ -563,6 +697,34 @@ private data class BudgetLimitTarget(val budgetId:Long,val monthStart:Long,val c
         if(parsed==null||!parsed.isFinite()||parsed<0.01) error="Indica um valor válido, mínimo de 0,01 €."
         else {error="";saving=true;save(parsed,decreases,note){success->saving=false;if(success)close() else error="Não foi possível guardar o movimento de acerto."}}
     }){Text(if(saving)"A guardar…" else "Guardar movimento",color=Green,fontWeight=FontWeight.Bold)}},dismissButton={TextButton(onClick=close,enabled=!saving){Text("Cancelar",color=Muted)}})
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable private fun CsvImportDialog(
+    csv:ParsedBankCsv,accounts:List<Account>,selectedAccountId:Long,importing:Boolean,
+    onAccountChange:(Long)->Unit,import:()->Unit,close:()->Unit
+){
+    var accountMenu by remember{mutableStateOf(false)}
+    val dates=csv.movements.map{it.date}
+    val dateFormatter=remember{SimpleDateFormat("dd/MM/yyyy",Locale("pt","PT"))}
+    val dateRange=if(dates.isEmpty())"" else "${dateFormatter.format(Date(dates.minOrNull()!!))}–${dateFormatter.format(Date(dates.maxOrNull()!!))}"
+    AlertDialog(
+        onDismissRequest={if(!importing)close()},
+        title={Text("Importar movimentos",color=Ink,fontWeight=FontWeight.Bold)},
+        text={Column(Modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(9.dp)){
+            Text("${csv.movements.size} movimentos encontrados",color=Ink,fontWeight=FontWeight.SemiBold)
+            Text("${csv.expenses} débitos · ${csv.income} créditos · $dateRange",color=Muted,style=MaterialTheme.typography.bodySmall)
+            ExposedDropdownMenuBox(expanded=accountMenu,onExpandedChange={accountMenu=!accountMenu}){
+                OutlinedTextField(accounts.firstOrNull{it.id==selectedAccountId}?.name?:"Selecionar conta",{},readOnly=true,label={Text("Conta de destino")},modifier=Modifier.menuAnchor().fillMaxWidth(),trailingIcon={ExposedDropdownMenuDefaults.TrailingIcon(expanded=accountMenu)})
+                ExposedDropdownMenu(expanded=accountMenu,onDismissRequest={accountMenu=false}){accounts.forEach{account->DropdownMenuItem(text={Text(account.name)},onClick={onAccountChange(account.id);accountMenu=false})}}
+            }
+            Text("Os débitos entram como despesas e os créditos como receitas. Sem regra conhecida, as despesas ficam sem orçamento para as poderes atribuir depois.",color=Muted,style=MaterialTheme.typography.bodySmall)
+            if(csv.skippedRows>0) Text("${csv.skippedRows} linhas inválidas serão ignoradas.",color=Coral,style=MaterialTheme.typography.bodySmall)
+            Text("Se importares este ficheiro outra vez, os movimentos duplicados são ignorados.",color=Muted,style=MaterialTheme.typography.bodySmall)
+        }},
+        confirmButton={TextButton(onClick=import,enabled=!importing&&accounts.any{it.id==selectedAccountId}){Text(if(importing)"A importar…" else "Importar ${csv.movements.size}",color=Green,fontWeight=FontWeight.Bold)}},
+        dismissButton={TextButton(onClick=close,enabled=!importing){Text("Cancelar",color=Muted)}}
+    )
 }
 
 @Composable private fun BudgetDialog(initial:Budget?,initialLimit:Double,save:(String,Double)->Unit,close:()->Unit){
