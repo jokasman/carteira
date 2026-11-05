@@ -127,7 +127,7 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
         } catch (cancelled: CancellationException) { throw cancelled } catch (_: Exception) { false }
         onComplete(saved)
     }
-    fun importCsv(accountId:Long,csv:ParsedBankCsv,onComplete:(CsvImportResult?,String?)->Unit)=viewModelScope.launch {
+    internal fun importCsv(accountId:Long,csv:ParsedBankCsv,onComplete:(CsvImportResult?,String?)->Unit)=viewModelScope.launch {
         try {
             if(dao.accountById(accountId)==null) error("Seleciona uma conta válida para importar os movimentos.")
             val rules=dao.allBudgetRules().associateBy{it.merchantKey}
