@@ -26,6 +26,8 @@ data class Budget(@PrimaryKey(autoGenerate = true) val id: Long = 0, val name: S
 
 @Dao interface FinanceDao {
     @Query("SELECT * FROM accounts ORDER BY id") fun accounts(): Flow<List<Account>>
+    @Query("SELECT * FROM accounts WHERE id = :id LIMIT 1") suspend fun accountById(id: Long): Account?
+    @Query("SELECT * FROM accounts ORDER BY id LIMIT 1") suspend fun firstAccount(): Account?
     @Query("SELECT * FROM transactions ORDER BY date DESC, id DESC") fun transactions(): Flow<List<FinanceTransaction>>
     @Query("SELECT * FROM budgets ORDER BY name") fun budgets(): Flow<List<Budget>>
     @Insert suspend fun addAccount(value: Account): Long
