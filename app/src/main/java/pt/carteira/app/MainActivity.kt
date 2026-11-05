@@ -56,13 +56,13 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
         }
     }
     fun addAccount(name: String, type: String) = viewModelScope.launch { if(name.isNotBlank()) dao.addAccount(Account(name=name, type=type)) }
-    fun addTransaction(title:String, amount:Double, kind:String, category:String, accountId:Long, recurring:Boolean, note:String, toAccountId:Long? = null, onComplete:(Boolean)->Unit = {}) = viewModelScope.launch {
+    fun addTransaction(title:String, amount:Double, kind:String, category:String, accountId:Long, recurring:Boolean, note:String, toAccountId:Long? = null, budgetId:Long? = null, onComplete:(Boolean)->Unit = {}) = viewModelScope.launch {
         val saved = try {
             val source = dao.accountById(accountId) ?: ensureDefaultAccount()
-            if(title.isBlank() || category.isBlank() || kind !in listOf("Despesa", "Receita", "Transferência") || !amount.isFinite() || amount < 0.01 || (kind == "Transferência" && (toAccountId == null || toAccountId == source.id || dao.accountById(toAccountId) == null))) false
+            if(title.isBlank() || category.isBlank() || kind !in listOf("Despesa", "Receita", "Transferência") || !amount.isFinite() || amount < 0.01 || (kind == "Transferência" && (toAccountId == null || toAccountId == source.id || dao.accountById(toAccountId) == null)) || (budgetId != null && dao.budgetById(budgetId) == null)) false
             else {
                 val roundedAmount = BigDecimal.valueOf(amount).setScale(2, RoundingMode.HALF_UP).toDouble()
-                dao.addTransaction(FinanceTransaction(title=title, amount=roundedAmount, kind=kind, category=category, accountId=source.id, recurring=recurring, note=note, toAccountId=toAccountId))
+                dao.addTransaction(FinanceTransaction(title=title, amount=roundedAmount, kind=kind, category=category, accountId=source.id, recurring=recurring, note=note, toAccountId=toAccountId, budgetId=budgetId))
                 true
             }
         } catch (cancelled: CancellationException) { throw cancelled } catch (_: Exception) { false }
@@ -88,27 +88,32 @@ class MainActivity : ComponentActivity() {
     val accounts by model.accounts.collectAsState(); val transactions by model.transactions.collectAsState(); val budgets by model.budgets.collectAsState()
     var section by remember { mutableStateOf("Início") }; var dialog by remember { mutableStateOf("") }
     var pendingDelete by remember { mutableStateOf<FinanceTransaction?>(null) }
+    var activeBudgetId by remember { mutableStateOf<Long?>(null) }
+    var movementBudgetId by remember { mutableStateOf<Long?>(null) }
+    val activeBudget = budgets.firstOrNull { it.id == activeBudgetId }
+    val pageTitle = if (section == "DetalheOrçamento") activeBudget?.name ?: "Orçamento" else section
     val total = accounts.sumOf { accountBalance(it, transactions) }
     Scaffold(containerColor=Paper, topBar={
         Row(Modifier.fillMaxWidth().background(Paper).statusBarsPadding().padding(horizontal=22.dp, vertical=18.dp), verticalAlignment=Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) { Text("CARTEIRA", style=MaterialTheme.typography.labelMedium, color=Green, fontWeight=FontWeight.Bold); Text(section, style=MaterialTheme.typography.headlineSmall, color=Ink, fontWeight=FontWeight.Bold) }
-            IconButton(onClick={dialog="movimento"}) { Icon(Icons.Default.Add, "Novo movimento", tint=Green) }
+            Column(Modifier.weight(1f)) { Text("CARTEIRA", style=MaterialTheme.typography.labelMedium, color=Green, fontWeight=FontWeight.Bold); Text(pageTitle, style=MaterialTheme.typography.headlineSmall, color=Ink, fontWeight=FontWeight.Bold) }
+            IconButton(onClick={movementBudgetId=if(section=="DetalheOrçamento")activeBudgetId else null;dialog="movimento"}) { Icon(Icons.Default.Add, "Novo movimento", tint=Green) }
         }
     }, bottomBar={ NavigationBar(containerColor=Color.White) {
         listOf("Início" to Icons.Default.Home, "Movimentos" to Icons.Default.ReceiptLong, "Orçamentos" to Icons.Default.PieChart, "Contas" to Icons.Default.AccountBalanceWallet, "Relatórios" to Icons.Default.BarChart).forEach { (label, icon) ->
-            NavigationBarItem(selected=section==label, onClick={section=label}, icon={Icon(icon,label)}, label={Text(label, style=MaterialTheme.typography.labelSmall)}, colors=NavigationBarItemDefaults.colors(selectedIconColor=Green,selectedTextColor=Green,indicatorColor=Mint))
+            NavigationBarItem(selected=section==label || (section=="DetalheOrçamento" && label=="Orçamentos"), onClick={section=label}, icon={Icon(icon,label)}, label={Text(label, style=MaterialTheme.typography.labelSmall)}, colors=NavigationBarItemDefaults.colors(selectedIconColor=Green,selectedTextColor=Green,indicatorColor=Mint))
         }
-    } }, floatingActionButton={ if(section in listOf("Movimentos","Orçamentos","Contas")) FloatingActionButton(onClick={dialog=when(section){"Orçamentos"->"orçamento";"Contas"->"conta";else->"movimento"}},containerColor=Green,contentColor=Color.White){Icon(Icons.Default.Add,"Adicionar")} }) { pad ->
+    } }, floatingActionButton={ if(section in listOf("Movimentos","Orçamentos","Contas","DetalheOrçamento")) FloatingActionButton(onClick={when(section){"Orçamentos"->dialog="orçamento";"Contas"->dialog="conta";"DetalheOrçamento"->{movementBudgetId=activeBudgetId;dialog="movimento"};else->{movementBudgetId=null;dialog="movimento"}}},containerColor=Green,contentColor=Color.White){Icon(Icons.Default.Add,"Adicionar")} }) { pad ->
         when(section) {
-            "Início" -> HomePage(Modifier.padding(pad), total, transactions, accounts, budgets, {section=it}, {pendingDelete=it}, {dialog="movimento"})
-            "Movimentos" -> TransactionsPage(Modifier.padding(pad), transactions, accounts, {pendingDelete=it}, {dialog="movimento"})
+            "Início" -> HomePage(Modifier.padding(pad), total, transactions, accounts, budgets, {section=it}, {pendingDelete=it}, {movementBudgetId=null;dialog="movimento"}, {budget->activeBudgetId=budget.id;section="DetalheOrçamento"})
+            "Movimentos" -> TransactionsPage(Modifier.padding(pad), transactions, accounts, {pendingDelete=it}, {movementBudgetId=null;dialog="movimento"})
             "Contas" -> AccountsPage(Modifier.padding(pad), accounts, transactions, {dialog="conta"})
-            "Orçamentos" -> BudgetsPage(Modifier.padding(pad), budgets, transactions, {dialog="orçamento"})
+            "Orçamentos" -> BudgetsPage(Modifier.padding(pad), budgets, transactions, {dialog="orçamento"}, {budget->activeBudgetId=budget.id;section="DetalheOrçamento"})
+            "DetalheOrçamento" -> BudgetDetailPage(Modifier.padding(pad), activeBudget, transactions, accounts, {movementBudgetId=activeBudget?.id;dialog="movimento"}, {pendingDelete=it})
             else -> ReportsPage(Modifier.padding(pad), transactions)
         }
     }
     if(dialog.isNotEmpty()) when(dialog) {
-        "movimento" -> TransactionDialog(accounts, { t,a,k,c,acc,r,n,dest,done -> model.addTransaction(t,a,k,c,acc,r,n,dest,done) }, {dialog=""})
+        "movimento" -> TransactionDialog(accounts, budgets.firstOrNull{it.id==movementBudgetId}, { t,a,k,c,acc,r,n,dest,budgetId,done -> model.addTransaction(t,a,k,c,acc,r,n,dest,budgetId,done) }, {dialog="";movementBudgetId=null})
         "conta" -> SimpleDialog("Nova conta", listOf("Nome","Tipo"), listOf("","Carteira"), listOf("Carteira","Conta bancária","Cartão de crédito","Poupança"), {v->model.addAccount(v[0],v.getOrElse(1){"Conta"});dialog=""}, {dialog=""})
         else -> SimpleDialog("Novo orçamento", listOf("Nome","Categoria","Limite (€)"), listOf("Casa","Habitação","500"), emptyList(), {v->model.addBudget(v[0],v[1],v[2].replace(',','.').toDoubleOrNull()?:0.0);dialog=""}, {dialog=""})
     }
@@ -123,7 +128,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-@Composable private fun HomePage(modifier:Modifier,total:Double,tx:List<FinanceTransaction>,accounts:List<Account>,budgets:List<Budget>,navigate:(String)->Unit,requestDelete:(FinanceTransaction)->Unit,addMovement:()->Unit) {
+@Composable private fun HomePage(modifier:Modifier,total:Double,tx:List<FinanceTransaction>,accounts:List<Account>,budgets:List<Budget>,navigate:(String)->Unit,requestDelete:(FinanceTransaction)->Unit,addMovement:()->Unit,openBudget:(Budget)->Unit) {
     val cal=Calendar.getInstance(); val month=cal.get(Calendar.MONTH); val year=cal.get(Calendar.YEAR)
     val monthly=tx.filter { val c=Calendar.getInstance().apply{timeInMillis=it.date}; c.get(Calendar.MONTH)==month&&c.get(Calendar.YEAR)==year }
     val spent=moneySum(monthly.filter{it.kind=="Despesa"}.map{it.amount}); val income=moneySum(monthly.filter{it.kind=="Receita"}.map{it.amount})
@@ -133,7 +138,7 @@ class MainActivity : ComponentActivity() {
         item { Row(horizontalArrangement=Arrangement.spacedBy(10.dp)) { accounts.take(3).forEach { AccountMini(it,tx) }; AddMini { navigate("Contas") } } }
         item { SectionTitle("Orçamento deste mês", "Ver orçamento", {navigate("Orçamentos")}) }
         if(budgets.isEmpty()) item { EmptyCard("Ainda não tens orçamentos", "Define limites por categoria para acompanhar as despesas.", "Criar orçamento", {navigate("Orçamentos")}) }
-        else items(budgets.take(3)) { b -> BudgetRow(b, tx) }
+        else items(budgets.take(3)) { b -> BudgetRow(b, tx) { openBudget(b) } }
         item { SectionTitle("Movimentos recentes", "Ver todos", {navigate("Movimentos")}) }
         if(tx.isEmpty()) item { EmptyCard("Tudo começa aqui", "Regista a tua primeira receita ou despesa.", "Adicionar movimento", addMovement) }
         else items(tx.take(5)) { TransactionRow(it,accounts,requestDelete) }
@@ -158,8 +163,41 @@ class MainActivity : ComponentActivity() {
 @Composable private fun AccountsPage(modifier:Modifier,accounts:List<Account>,tx:List<FinanceTransaction>,add:()->Unit){Column(modifier.fillMaxSize().padding(20.dp)){Row(verticalAlignment=Alignment.CenterVertically){Text("Contas e carteiras",Modifier.weight(1f),style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold,color=Ink);TextButton(onClick=add){Text("+ Adicionar")}};Spacer(Modifier.height(8.dp));accounts.forEach{AccountDetail(it,tx);Spacer(Modifier.height(10.dp))}}}
 @Composable private fun AccountDetail(a:Account,tx:List<FinanceTransaction>){val bal=accountBalance(a,tx);Row(Modifier.fillMaxWidth().background(Color.White,RoundedCornerShape(18.dp)).padding(18.dp),verticalAlignment=Alignment.CenterVertically){Icon(Icons.Default.AccountBalanceWallet,null,tint=Green,modifier=Modifier.size(40.dp));Column(Modifier.weight(1f).padding(start=14.dp)){Text(a.name,color=Ink,fontWeight=FontWeight.Bold);Text(a.type,color=Muted,style=MaterialTheme.typography.bodySmall)};Text(money(bal),color=Ink,fontWeight=FontWeight.Bold)} }
 
-@Composable private fun BudgetsPage(modifier:Modifier,budgets:List<Budget>,tx:List<FinanceTransaction>,add:()->Unit){Column(modifier.fillMaxSize().padding(20.dp)){Row(verticalAlignment=Alignment.CenterVertically){Column(Modifier.weight(1f)){Text("Os teus limites",style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold,color=Ink);Text("Acompanha as despesas por categoria",color=Muted)};TextButton(onClick=add){Text("+ Criar")}};Spacer(Modifier.height(12.dp));if(budgets.isEmpty())EmptyCard("Orçamento sob controlo","Cria um limite mensal para uma categoria.","Criar orçamento",add)else budgets.forEach{BudgetRow(it,tx);Spacer(Modifier.height(10.dp))}}}
-@Composable private fun BudgetRow(b:Budget,tx:List<FinanceTransaction>){val cal=Calendar.getInstance();val spent=moneySum(tx.filter{it.kind=="Despesa"&&it.category.equals(b.category,true)&&Calendar.getInstance().apply{timeInMillis=it.date}.let{c->c.get(Calendar.MONTH)==cal.get(Calendar.MONTH)&&c.get(Calendar.YEAR)==cal.get(Calendar.YEAR)}}.map{it.amount});val p=(spent/b.limitAmount).toFloat().coerceIn(0f,1f);Column(Modifier.fillMaxWidth().background(Color.White,RoundedCornerShape(18.dp)).padding(16.dp)){Row(verticalAlignment=Alignment.CenterVertically){Column(Modifier.weight(1f)){Text(b.name,color=Ink,fontWeight=FontWeight.Bold);Text(b.category,color=Muted,style=MaterialTheme.typography.bodySmall)};Text("${money(spent)} / ${money(b.limitAmount)}",color=Ink,fontWeight=FontWeight.SemiBold)};Spacer(Modifier.height(12.dp));LinearProgressIndicator(progress={p},modifier=Modifier.fillMaxWidth().height(7.dp),color=if(p>.9f)Coral else Green,trackColor=Mint);Text(if(spent>b.limitAmount)"Ultrapassaste ${money(spent-b.limitAmount)}" else "Disponível ${money(b.limitAmount-spent)}",color=if(p>.9f)Coral else Muted,style=MaterialTheme.typography.labelSmall,modifier=Modifier.padding(top=7.dp))} }
+@Composable private fun BudgetsPage(modifier:Modifier,budgets:List<Budget>,tx:List<FinanceTransaction>,add:()->Unit,openBudget:(Budget)->Unit){
+    LazyColumn(modifier.fillMaxSize(),contentPadding=PaddingValues(20.dp),verticalArrangement=Arrangement.spacedBy(10.dp)){
+        item { Row(verticalAlignment=Alignment.CenterVertically){Column(Modifier.weight(1f)){Text("Os teus limites",style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold,color=Ink);Text("Toca num orçamento para ver os registos",color=Muted)};TextButton(onClick=add){Text("+ Criar")}} }
+        if(budgets.isEmpty()) item { EmptyCard("Orçamento sob controlo","Cria um limite mensal para uma categoria.","Criar orçamento",add) }
+        else items(budgets){budget->BudgetRow(budget,tx){openBudget(budget)}}
+    }
+}
+
+@Composable private fun BudgetRow(b:Budget,tx:List<FinanceTransaction>,onClick:()->Unit){
+    val spent=budgetSpent(b,tx); val p=(spent/b.limitAmount).toFloat().coerceIn(0f,1f)
+    Column(Modifier.fillMaxWidth().clickable(onClick=onClick).background(Color.White,RoundedCornerShape(18.dp)).padding(16.dp)){
+        Row(verticalAlignment=Alignment.CenterVertically){Column(Modifier.weight(1f)){Text(b.name,color=Ink,fontWeight=FontWeight.Bold);Text(b.category,color=Muted,style=MaterialTheme.typography.bodySmall)};Text("${money(spent)} / ${money(b.limitAmount)}",color=Ink,fontWeight=FontWeight.SemiBold)}
+        Spacer(Modifier.height(12.dp));LinearProgressIndicator(progress={p},modifier=Modifier.fillMaxWidth().height(7.dp),color=if(p>.9f)Coral else Green,trackColor=Mint)
+        Text(if(spent>b.limitAmount)"Ultrapassaste ${money(spent-b.limitAmount)}" else "Disponível ${money(b.limitAmount-spent)}",color=if(p>.9f)Coral else Muted,style=MaterialTheme.typography.labelSmall,modifier=Modifier.padding(top=7.dp))
+    }
+}
+
+@Composable private fun BudgetDetailPage(modifier:Modifier,budget:Budget?,tx:List<FinanceTransaction>,accounts:List<Account>,add:()->Unit,requestDelete:(FinanceTransaction)->Unit){
+    if(budget==null){EmptyCard("Orçamento indisponível","Este orçamento já não existe.","Voltar aos orçamentos",{}) ; return}
+    val records=budgetTransactions(budget,tx)
+    Column(modifier.fillMaxSize().padding(horizontal=20.dp)){
+        Spacer(Modifier.height(8.dp));BudgetRow(budget,tx){}
+        Row(Modifier.fillMaxWidth().padding(top=18.dp,bottom=8.dp),verticalAlignment=Alignment.CenterVertically){Text("Registos deste mês",Modifier.weight(1f),style=MaterialTheme.typography.titleMedium,color=Ink,fontWeight=FontWeight.Bold);Text(records.size.toString(),color=Muted)}
+        if(records.isEmpty()) EmptyCard("Ainda sem registos","Os movimentos deste orçamento aparecem aqui.","Adicionar movimento",add)
+        else LazyColumn(Modifier.weight(1f),verticalArrangement=Arrangement.spacedBy(8.dp)){items(records){TransactionRow(it,accounts,requestDelete)}}
+        if(records.isNotEmpty()) Button(onClick=add,modifier=Modifier.fillMaxWidth().padding(vertical=10.dp)){Icon(Icons.Default.Add,null);Spacer(Modifier.width(8.dp));Text("Adicionar movimento")}
+    }
+}
+
+private fun budgetTransactions(budget:Budget,tx:List<FinanceTransaction>):List<FinanceTransaction> = tx.filter { t ->
+    val cal=Calendar.getInstance().apply{timeInMillis=t.date}; val now=Calendar.getInstance()
+    t.kind=="Despesa" && cal.get(Calendar.MONTH)==now.get(Calendar.MONTH) && cal.get(Calendar.YEAR)==now.get(Calendar.YEAR) &&
+        (t.budgetId==budget.id || (t.budgetId==null && t.category.equals(budget.category,true)))
+}
+private fun budgetSpent(budget:Budget,tx:List<FinanceTransaction>):Double = moneySum(budgetTransactions(budget,tx).map{it.amount})
 
 @Composable private fun ReportsPage(modifier:Modifier,tx:List<FinanceTransaction>){val exp=moneySum(tx.filter{it.kind=="Despesa"}.map{it.amount});val inc=moneySum(tx.filter{it.kind=="Receita"}.map{it.amount});val cats=tx.filter{it.kind=="Despesa"}.groupBy{it.category}.mapValues{e->moneySum(e.value.map{it.amount})}.toList().sortedByDescending{it.second};Column(modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp)){Text("Resumo geral",style=MaterialTheme.typography.titleLarge,color=Ink,fontWeight=FontWeight.Bold);Text("Com base nos movimentos registados",color=Muted);Spacer(Modifier.height(16.dp));Row(horizontalArrangement=Arrangement.spacedBy(10.dp)){ReportTile("Receitas",inc,Green,Modifier.weight(1f));ReportTile("Despesas",exp,Coral,Modifier.weight(1f))};Spacer(Modifier.height(22.dp));Text("Despesas por categoria",style=MaterialTheme.typography.titleMedium,color=Ink,fontWeight=FontWeight.Bold);Spacer(Modifier.height(10.dp));if(cats.isEmpty())Text("Ainda não existem despesas para analisar.",color=Muted)else cats.forEach{(cat,value)->Row(Modifier.fillMaxWidth().padding(vertical=9.dp),verticalAlignment=Alignment.CenterVertically){Text(cat,Modifier.weight(1f),color=Ink);Text(money(value),color=Ink,fontWeight=FontWeight.SemiBold)}};Spacer(Modifier.height(14.dp));Text("Movimentos totais: ${tx.size}",color=Muted)} }
 @Composable private fun ReportTile(label:String,value:Double,color:Color,modifier:Modifier){Column(modifier.background(Color.White,RoundedCornerShape(18.dp)).padding(16.dp)){Text(label,color=Muted);Text(money(value),color=color,style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold)} }
@@ -169,13 +207,14 @@ class MainActivity : ComponentActivity() {
 @Composable private fun EmptyCard(title:String,body:String,action:String,onClick:()->Unit){Column(Modifier.fillMaxWidth().background(Color.White,RoundedCornerShape(20.dp)).padding(20.dp)){Text(title,color=Ink,fontWeight=FontWeight.Bold);Text(body,color=Muted,modifier=Modifier.padding(top=5.dp,bottom=12.dp));OutlinedButton(onClick=onClick){Text(action,color=Green)}}}
 
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable private fun TransactionDialog(accounts:List<Account>,save:(String,Double,String,String,Long,Boolean,String,Long?,(Boolean)->Unit)->Unit,close:()->Unit){var title by remember{mutableStateOf("")};var amount by remember{mutableStateOf("")};var kind by remember{mutableStateOf("Despesa")};var category by remember{mutableStateOf("Alimentação")};var note by remember{mutableStateOf("")};var recurring by remember{mutableStateOf(false)};var account by remember{mutableLongStateOf(accounts.firstOrNull()?.id?:0L)};var destination by remember{mutableLongStateOf(accounts.getOrNull(1)?.id?:accounts.firstOrNull()?.id?:0L)};var expanded by remember{mutableStateOf(false)};var expandedDest by remember{mutableStateOf(false)};var error by remember{mutableStateOf("")};var saving by remember{mutableStateOf(false)}
+@Composable private fun TransactionDialog(accounts:List<Account>,budget:Budget?,save:(String,Double,String,String,Long,Boolean,String,Long?,Long?,(Boolean)->Unit)->Unit,close:()->Unit){var title by remember{mutableStateOf("")};var amount by remember{mutableStateOf("")};var kind by remember{mutableStateOf("Despesa")};var category by remember(budget?.id){mutableStateOf(budget?.category?:"Alimentação")};var note by remember{mutableStateOf("")};var recurring by remember{mutableStateOf(false)};var account by remember{mutableLongStateOf(accounts.firstOrNull()?.id?:0L)};var destination by remember{mutableLongStateOf(accounts.getOrNull(1)?.id?:accounts.firstOrNull()?.id?:0L)};var expanded by remember{mutableStateOf(false)};var expandedDest by remember{mutableStateOf(false)};var error by remember{mutableStateOf("")};var saving by remember{mutableStateOf(false)}
     LaunchedEffect(accounts) {
         if(accounts.none{it.id==account}) account=accounts.firstOrNull()?.id?:0L
         if(accounts.none{it.id==destination && it.id!=account}) destination=accounts.firstOrNull{it.id!=account}?.id?:account
     }
     AlertDialog(onDismissRequest={if(!saving)close()},title={Text("Novo movimento",color=Ink,fontWeight=FontWeight.Bold)},text={Column(Modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(9.dp)){
-        Row(horizontalArrangement=Arrangement.spacedBy(6.dp)){listOf("Despesa","Receita","Transferência").forEach{FilterChip(selected=kind==it,onClick={kind=it},label={Text(it,style=MaterialTheme.typography.labelSmall)})}}
+        if(budget==null) Row(horizontalArrangement=Arrangement.spacedBy(6.dp)){listOf("Despesa","Receita","Transferência").forEach{FilterChip(selected=kind==it,onClick={kind=it},label={Text(it,style=MaterialTheme.typography.labelSmall)})}}
+        else Text("Associado ao orçamento: ${budget.name}",color=Green,style=MaterialTheme.typography.labelLarge,fontWeight=FontWeight.SemiBold)
         OutlinedTextField(title,{title=it},label={Text("Descrição")},singleLine=true)
         OutlinedTextField(amount,{amount=it},label={Text("Montante (€)")},singleLine=true,keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Decimal))
         OutlinedTextField(category,{category=it},label={Text("Categoria")},singleLine=true)
@@ -190,7 +229,7 @@ class MainActivity : ComponentActivity() {
             title.isBlank() -> error="Indica uma descrição."
             parsedAmount==null || !parsedAmount.isFinite() || parsedAmount<0.01 -> error="Indica um montante válido, mínimo de 0,01 €."
             kind=="Transferência" && accounts.none{it.id==destination && it.id!=account} -> error="Cria ou escolhe uma conta de destino diferente."
-            else -> { error=""; saving=true; save(title,parsedAmount,kind,category,account,recurring,note,if(kind=="Transferência")destination else null){success->saving=false;if(success)close() else error="Não foi possível guardar. Confirma as contas e tenta novamente."} }
+            else -> { error=""; saving=true; save(title,parsedAmount,kind,category,account,recurring,note,if(kind=="Transferência")destination else null,budget?.id){success->saving=false;if(success)close() else error="Não foi possível guardar. Confirma as contas e tenta novamente."} }
         }
     }){Text(if(saving)"A guardar…" else "Guardar",color=Green,fontWeight=FontWeight.Bold)}},dismissButton={TextButton(onClick=close,enabled=!saving){Text("Cancelar",color=Muted) }})
 }

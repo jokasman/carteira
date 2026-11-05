@@ -5,11 +5,14 @@ plugins {
     id("com.google.devtools.ksp")
 }
 
+val carteiraKeystorePath = System.getenv("CARTEIRA_KEYSTORE_PATH")
+val carteiraKeystorePassword = System.getenv("CARTEIRA_KEYSTORE_PASSWORD")
+
 android {
     namespace = "pt.carteira.app"
     compileSdk = 35
     defaultConfig {
-        applicationId = "pt.carteira.app"
+        applicationId = "pt.jokasman.carteira"
         minSdk = 26
         targetSdk = 35
         versionCode = 1
@@ -21,6 +24,24 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
+    signingConfigs {
+        if (!carteiraKeystorePath.isNullOrBlank() && !carteiraKeystorePassword.isNullOrBlank()) {
+            create("stableDebug") {
+                storeFile = file(carteiraKeystorePath)
+                storePassword = carteiraKeystorePassword
+                keyAlias = "carteira"
+                keyPassword = carteiraKeystorePassword
+                storeType = "pkcs12"
+            }
+        }
+    }
+    buildTypes {
+        getByName("debug") {
+            if (!carteiraKeystorePath.isNullOrBlank() && !carteiraKeystorePassword.isNullOrBlank()) {
+                signingConfig = signingConfigs.getByName("stableDebug")
+            }
+        }
+    }
 }
 
 dependencies {

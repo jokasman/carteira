@@ -8,6 +8,7 @@ Aplicação nativa Android de finanças pessoais, construída com Kotlin, Jetpac
 - Registo de despesas, receitas e transferências, com categoria, conta, nota e indicação de recorrência.
 - Gestão de várias contas e carteiras.
 - Orçamentos por categoria com acompanhamento do valor gasto e disponível.
+- Detalhe de cada orçamento com os movimentos do mês e criação de movimentos já associados ao orçamento.
 - Relatórios de receitas, despesas e distribuição por categoria.
 - Filtro por tipo de movimento e remoção de movimentos por toque prolongado.
 - Interface em português e valores formatados em euros.
@@ -16,7 +17,9 @@ Aplicação nativa Android de finanças pessoais, construída com Kotlin, Jetpac
 
 Abra esta pasta no Android Studio (Hedgehog ou posterior), aguarde a sincronização do Gradle e execute a configuração `app` num dispositivo/emulador Android 8.0 ou posterior. O projeto usa Android Gradle Plugin 8.7.3, Kotlin 2.0.21, Compose e Room.
 
-O workflow **Build Android APK** também compila o APK de depuração em cada push para `main` e pode ser iniciado manualmente no separador **Actions** do GitHub. Depois de concluído, descarrega o artifact `Carteira-APK` na página da execução.
+O workflow **Build Android APK** compila em cada push para `main` e pode ser iniciado manualmente no separador **Actions** do GitHub. Para disponibilizar APKs instaláveis e atualizáveis, configura os secrets de repositório `CARTEIRA_KEYSTORE_BASE64` e `CARTEIRA_KEYSTORE_PASSWORD` com um keystore PKCS#12 permanente (alias `carteira`). Sem esses secrets, o workflow só compila e não publica um APK, para não distribuir um APK de depuração com assinatura temporária.
+
+Com a assinatura permanente configurada, descarrega o artifact `Carteira-APK` na página da execução. O identificador Android foi alterado para `pt.jokasman.carteira` para evitar o conflito de instalação mostrado pela versão anterior. A instalação antiga (`pt.carteira.app`) permanece separada e os dados locais não são migrados automaticamente para a nova aplicação.
 
 ## Limites desta versão
 

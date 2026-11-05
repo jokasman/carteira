@@ -24,11 +24,26 @@ jobs:
         with:
           gradle-version: '8.9'
 
+      - name: Configure stable APK signing
+        env:
+          CARTEIRA_KEYSTORE_BASE64: ${{ secrets.CARTEIRA_KEYSTORE_BASE64 }}
+          CARTEIRA_KEYSTORE_PASSWORD: ${{ secrets.CARTEIRA_KEYSTORE_PASSWORD }}
+        run: |
+          if [ -z "$CARTEIRA_KEYSTORE_BASE64" ] || [ -z "$CARTEIRA_KEYSTORE_PASSWORD" ]; then
+            echo "::warning::No stable signing key configured. This run will compile the app but will not publish an APK artifact."
+            echo "CARTEIRA_SKIP_APK_UPLOAD=true" >> "$GITHUB_ENV"
+          else
+            printf '%s' "$CARTEIRA_KEYSTORE_BASE64" | base64 --decode > "$GITHUB_WORKSPACE/carteira-signing.p12"
+            echo "CARTEIRA_KEYSTORE_PATH=$GITHUB_WORKSPACE/carteira-signing.p12" >> "$GITHUB_ENV"
+            echo "CARTEIRA_KEYSTORE_PASSWORD=$CARTEIRA_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+          fi
+
       - name: Build debug APK
         run: gradle --no-daemon assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
+        if: env.CARTEIRA_SKIP_APK_UPLOAD != 'true'
         with:
           name: Carteira-APK
           path: app/build/outputs/apk/debug/app-debug.apk
