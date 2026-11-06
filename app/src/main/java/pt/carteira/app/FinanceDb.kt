@@ -23,7 +23,8 @@ data class FinanceTransaction(
     val toAccountId: Long? = null,
     val budgetId: Long? = null,
     val importKey: String? = null,
-    @ColumnInfo(defaultValue = "1") val active: Boolean = true
+    @ColumnInfo(defaultValue = "1") val active: Boolean = true,
+    @ColumnInfo(defaultValue = "0") val importedFromCsv: Boolean = false
 )
 
 @Entity(tableName = "budgets")
@@ -87,7 +88,7 @@ data class BudgetPeriod(val budgetId: Long, val monthStart: Long, val limitAmoun
     @Query("SELECT COUNT(*) FROM accounts") suspend fun accountCount(): Int
 }
 
-@Database(entities = [Account::class, FinanceTransaction::class, Budget::class, Category::class, BudgetPeriod::class, BudgetRule::class], version = 8, exportSchema = false)
+@Database(entities = [Account::class, FinanceTransaction::class, Budget::class, Category::class, BudgetPeriod::class, BudgetRule::class], version = 9, exportSchema = false)
 abstract class FinanceDb : RoomDatabase() {
     abstract fun dao(): FinanceDao
     companion object {
@@ -158,9 +159,15 @@ abstract class FinanceDb : RoomDatabase() {
                 db.execSQL("ALTER TABLE transactions ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
             }
         }
+        private val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE transactions ADD COLUMN importedFromCsv INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("UPDATE transactions SET importedFromCsv = 1 WHERE importKey IS NOT NULL")
+            }
+        }
         fun get(context: Context): FinanceDb = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext, FinanceDb::class.java, "carteira.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
                 .build().also { instance = it }
         }
     }
