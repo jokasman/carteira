@@ -192,15 +192,29 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
             dao.saveBudgetPeriod(BudgetPeriod(budgetId,monthStart,BigDecimal.valueOf(amount).setScale(2,RoundingMode.HALF_UP).toDouble()))
         }
     }
-    fun deleteTransaction(value:FinanceTransaction) = viewModelScope.launch { dao.deleteTransaction(value) }
+    fun deleteTransaction(value:FinanceTransaction) = viewModelScope.launch { dao.deleteTransactionAndClearSettlement(value) }
     fun deleteTransactions(values:List<FinanceTransaction>) = viewModelScope.launch {
-        if(values.isNotEmpty()) dao.deleteTransactions(values)
+        if(values.isNotEmpty()) dao.deleteTransactionsAndClearSettlement(values)
     }
-    fun assignBudget(value:FinanceTransaction,budgetId:Long) = viewModelScope.launch {
+    fun assignBudget(value:FinanceTransaction,budgetId:Long,rememberForFuture:Boolean=false) = viewModelScope.launch {
         val budget=dao.budgetById(budgetId)
         if(value.kind=="Despesa"&&value.budgetId==null&&budget!=null&&budgetVisibleInMonth(budget,currentMonthStart(value.date))) {
-            dao.updateTransaction(value.copy(budgetId=budget.id))
+            val key=normalizeMovementKey(value.title)
+            val rule=if(rememberForFuture&&key.isNotBlank())BudgetRule(key,value.title.trim(),budget.id) else null
+            dao.saveTransactionAndRule(value.copy(budgetId=budget.id),rule)
         }
+    }
+    fun settleIncome(incomeId:Long,expenseIds:Set<Long>,onComplete:(Boolean)->Unit) = viewModelScope.launch {
+        val settled=try {
+            val income=dao.transactionById(incomeId)
+            val ids=expenseIds.toList()
+            val expenses=if(ids.isEmpty())emptyList() else dao.transactionsByIds(ids)
+            val valid=income!=null&&income.kind=="Receita"&&income.active&&ids.isNotEmpty()&&expenses.size==ids.size&&
+                expenses.all{it.kind=="Despesa"&&it.active&&it.budgetId==null&&it.settlementRevenueId==null}
+            if(valid){dao.settleIncome(income!!,expenses);true}else false
+        } catch(cancelled:CancellationException){throw cancelled}
+        catch(_:Exception){false}
+        onComplete(settled)
     }
     fun splitTransaction(
         original:FinanceTransaction,firstAmount:Double,secondAmount:Double,firstTitle:String,secondTitle:String,
@@ -261,6 +275,8 @@ class MainActivity : ComponentActivity() {
     var pendingBulkDelete by remember { mutableStateOf<List<FinanceTransaction>?>(null) }
     var pendingBudgetAssignment by remember { mutableStateOf<FinanceTransaction?>(null) }
     var pendingSplit by remember { mutableStateOf<FinanceTransaction?>(null) }
+    var pendingSettlementIncome by remember { mutableStateOf<FinanceTransaction?>(null) }
+    var pendingSettlementDetails by remember { mutableStateOf<FinanceTransaction?>(null) }
     var selectedMovementIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
     var pendingEdit by remember { mutableStateOf<FinanceTransaction?>(null) }
     var pendingAccountEdit by remember { mutableStateOf<Account?>(null) }
@@ -312,7 +328,7 @@ class MainActivity : ComponentActivity() {
     } }, floatingActionButton={ if(section in listOf("Movimentos","Orçamentos","Contas")||(section=="DetalheOrçamento"&&canAddBudgetMovement)) FloatingActionButton(onClick={when(section){"Orçamentos"->{pendingEdit=null;dialog="orçamento"};"Contas"->dialog="conta";"DetalheOrçamento"->addMovement(activeBudgetId);else->addMovement()}},containerColor=Green,contentColor=Color.White){Icon(Icons.Default.Add,"Adicionar")} }) { pad ->
         when(section) {
             "Início" -> HomePage(Modifier.padding(pad), total, transactions, accounts, budgets, budgetPeriods, {section=it}, {pendingDelete=it}, {editMovement(it)}, {addMovement()}, {budget->activeBudgetId=budget.id;selectedBudgetMonth=currentMonthStart();section="DetalheOrçamento"})
-            "Movimentos" -> TransactionsPage(Modifier.padding(pad), transactions, accounts, budgets, selectedMovementIds, {selectedMovementIds=it}, {pendingBulkDelete=it}, {pendingBudgetAssignment=it;dialog="atribuir-orçamento"}, {editMovement(it)}, {addMovement()}, {openCsvPicker()})
+            "Movimentos" -> TransactionsPage(Modifier.padding(pad), transactions, accounts, budgets, selectedMovementIds, {selectedMovementIds=it}, {pendingBulkDelete=it}, {pendingBudgetAssignment=it;dialog="atribuir-orçamento"}, {editMovement(it)}, {addMovement()}, {openCsvPicker()}, {pendingSettlementIncome=it;dialog="liquidar-receita"}, {pendingSettlementDetails=it;dialog="ver-liquidacao"})
             "Contas" -> AccountsPage(Modifier.padding(pad), accounts, transactions, {pendingAccountEdit=null;dialog="conta"}, {pendingAccountEdit=it;dialog="editar-conta"})
             "Orçamentos" -> BudgetsPage(Modifier.padding(pad), budgets, transactions, budgetPeriods, selectedBudgetMonth, {selectedBudgetMonth=it}, budgetSort, {budgetSort=it}, showBudgetRemaining, {showBudgetRemaining=it}, {pendingBudgetLimit=null;pendingBudgetEdit=null;dialog="orçamento"}, {budget->addMovement(budget.id)}, {budget->activeBudgetId=budget.id;section="DetalheOrçamento"})
             "DetalheOrçamento" -> BudgetDetailPage(Modifier.padding(pad), activeBudget, transactions, accounts, budgetPeriods, selectedBudgetMonth, {selectedBudgetMonth=it}, {addMovement(activeBudget?.id)}, {pendingDelete=it}, {editMovement(it)}, {budget,monthStart,amount->pendingBudgetLimit=BudgetLimitTarget(budget.id,monthStart,amount);dialog="budget-limit"}, {budget->pendingBudgetEdit=budget;dialog="editar-orçamento"}, {budget->pendingBudgetArchive=budget})
@@ -322,7 +338,9 @@ class MainActivity : ComponentActivity() {
     if(dialog.isNotEmpty()) when(dialog) {
         "movimento" -> TransactionDialog(accounts,budgets,budgetRules,budgets.firstOrNull{it.id==movementBudgetId},pendingEdit,{value,rememberRule,done->model.saveTransaction(value,rememberRule,done)},{pendingEdit=null;dialog="";movementBudgetId=null},{pendingEdit=null;movementBudgetId=null;dialog="orçamento"},{transaction->pendingSplit=transaction;dialog="dividir-movimento"})
         "dividir-movimento" -> pendingSplit?.let{transaction->SplitTransactionDialog(transaction,budgets,{firstAmount,secondAmount,firstTitle,secondTitle,firstBudgetId,secondBudgetId,done->model.splitTransaction(transaction,firstAmount,secondAmount,firstTitle,secondTitle,firstBudgetId,secondBudgetId){success->done(success);if(success){pendingSplit=null;pendingEdit=null;movementBudgetId=null;dialog=""}}},{pendingSplit=null;dialog="movimento"})}
-        "atribuir-orçamento" -> pendingBudgetAssignment?.let{transaction->BudgetAssignmentDialog(transaction,budgets,{value,budgetId->model.assignBudget(value,budgetId);pendingBudgetAssignment=null;dialog=""},{pendingBudgetAssignment=null;dialog=""})}
+        "liquidar-receita" -> pendingSettlementIncome?.let{income->SettleIncomeDialog(income,transactions.filter{it.kind=="Despesa"&&it.active&&it.budgetId==null&&it.settlementRevenueId==null},{selectedIds,done->model.settleIncome(income.id,selectedIds,done)},{pendingSettlementIncome=null;dialog=""})}
+        "ver-liquidacao" -> pendingSettlementDetails?.let{income->SettledExpensesDialog(income,transactions.filter{it.settlementRevenueId==income.id},{pendingSettlementDetails=null;dialog=""})}
+        "atribuir-orçamento" -> pendingBudgetAssignment?.let{transaction->BudgetAssignmentDialog(transaction,budgets,{value,budgetId,remember->model.assignBudget(value,budgetId,remember);pendingBudgetAssignment=null;dialog=""},{pendingBudgetAssignment=null;dialog=""})}
         "conta" -> AccountDialog(null,0.0, {value->model.saveAccount(value);dialog=""}, {dialog=""}, {})
         "editar-conta" -> AccountDialog(pendingAccountEdit, pendingAccountEdit?.let{accountBalance(it,transactions)}?:0.0, {value->model.saveAccount(value);pendingAccountEdit=null;dialog=""}, {pendingAccountEdit=null;dialog=""}, {account->adjustmentAccount=account;pendingAccountEdit=null;dialog="acerto-conta"})
         "orçamento" -> BudgetDialog(null,500.0,{name,limit->model.addBudget(name,limit);dialog=""},{dialog=""})
@@ -414,7 +432,8 @@ class MainActivity : ComponentActivity() {
 @Composable private fun TransactionsPage(
     modifier:Modifier,tx:List<FinanceTransaction>,accounts:List<Account>,budgets:List<Budget>,selectedIds:Set<Long>,onSelectionChange:(Set<Long>)->Unit,
     requestDeleteSelected:(List<FinanceTransaction>)->Unit,assignBudget:(FinanceTransaction)->Unit,
-    requestEdit:(FinanceTransaction)->Unit,addMovement:()->Unit,importCsv:()->Unit
+    requestEdit:(FinanceTransaction)->Unit,addMovement:()->Unit,importCsv:()->Unit,
+    requestSettlement:(FinanceTransaction)->Unit,viewSettlement:(FinanceTransaction)->Unit
 ){
     var kindFilter by remember{mutableStateOf("Todos")}
     var budgetFilter by remember{mutableStateOf("Todos")}
@@ -501,11 +520,17 @@ class MainActivity : ComponentActivity() {
         if(filtered.isEmpty()) EmptyCard(if(tx.isEmpty())"Sem movimentos" else "Sem resultados",if(tx.isEmpty())"Importa o extrato CSV ou adiciona movimentos manualmente." else "Não há movimentos com estes filtros.","Novo movimento",addMovement)
         else LazyColumn(verticalArrangement=Arrangement.spacedBy(9.dp)){items(filtered,key={it.id}){transaction->
             val isSelected=transaction.id in selectedIds
+            val linkedExpenses=if(transaction.kind=="Receita")tx.filter{it.settlementRevenueId==transaction.id} else emptyList()
+            val settlementIncomeTitle=transaction.settlementRevenueId?.let{id->tx.firstOrNull{it.id==id}?.title?.takeIf{it.isNotBlank()}?:"Receita"}
             TransactionRow(
                 transaction,accounts,{},requestEdit,budgets,
                 selectionMode=selectionMode,selected=isSelected,
                 onSelect={onSelectionChange(if(isSelected)selectedIds-transaction.id else selectedIds+transaction.id)},
-                assignBudget=assignBudget
+                assignBudget=assignBudget,
+                settleIncome=if(transaction.kind=="Receita"&&transaction.active)requestSettlement else null,
+                settledExpenseCount=linkedExpenses.size,
+                viewSettlement=if(linkedExpenses.isNotEmpty())viewSettlement else null,
+                settlementIncomeTitle=settlementIncomeTitle
             )
         }}
     }
@@ -657,7 +682,8 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
 @OptIn(ExperimentalFoundationApi::class)
 @Composable private fun TransactionRow(
     t:FinanceTransaction,accounts:List<Account>,delete:(FinanceTransaction)->Unit,edit:(FinanceTransaction)->Unit,budgets:List<Budget> = emptyList(),
-    selectionMode:Boolean=false,selected:Boolean=false,onSelect:(()->Unit)?=null,assignBudget:((FinanceTransaction)->Unit)?=null
+    selectionMode:Boolean=false,selected:Boolean=false,onSelect:(()->Unit)?=null,assignBudget:((FinanceTransaction)->Unit)?=null,
+    settleIncome:((FinanceTransaction)->Unit)?=null,settledExpenseCount:Int=0,viewSettlement:((FinanceTransaction)->Unit)?=null,settlementIncomeTitle:String?=null
 ){
     val expense=t.kind=="Despesa"||t.kind=="Transferência"||(t.kind=="Ajuste"&&t.amount<0); val color=if(!t.active)Muted else if(expense)Coral else Green
     val budgetLabel=if(t.kind=="Despesa")if(t.budgetId==null)"Sem orçamento" else budgets.firstOrNull{it.id==t.budgetId}?.name?:"Orçamento" else null
@@ -671,11 +697,17 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
         }
         Column(Modifier.weight(1f).padding(horizontal=12.dp)){
             Text(t.title.ifBlank{t.kind},color=if(t.active)Ink else Muted,fontWeight=FontWeight.SemiBold)
-            val details=listOfNotNull(budgetLabel,if(t.recurring)"Recorrente" else null,if(t.importedFromCsv||t.importKey!=null)"CSV" else null,if(!t.active)"Inativo" else null)
+            val details=listOfNotNull(budgetLabel,if(t.recurring)"Recorrente" else null,if(t.importedFromCsv||t.importKey!=null)"CSV" else null,if(!t.active)"Inativo" else null,settlementIncomeTitle?.let{"Liquidada com $it"})
             Text(details.joinToString(" · "),color=if(t.active&&t.kind=="Despesa"&&t.budgetId==null)Coral else Muted,style=MaterialTheme.typography.labelSmall,maxLines=1)
             if(t.kind=="Despesa"&&t.budgetId==null&&assignBudget!=null) TextButton(
                 onClick={assignBudget(t)},contentPadding=PaddingValues(horizontal=0.dp,vertical=0.dp),modifier=Modifier.height(30.dp)
             ){Text("Atribuir orçamento",color=Green,style=MaterialTheme.typography.labelSmall)}
+            if(t.kind=="Receita"&&t.active&&!selectionMode&&settleIncome!=null) TextButton(
+                onClick={settleIncome(t)},contentPadding=PaddingValues(horizontal=0.dp,vertical=0.dp),modifier=Modifier.height(30.dp)
+            ){Text("Liquidar",color=Green,style=MaterialTheme.typography.labelSmall)}
+            if(t.kind=="Receita"&&!t.active&&settledExpenseCount>0&&viewSettlement!=null) TextButton(
+                onClick={viewSettlement(t)},contentPadding=PaddingValues(horizontal=0.dp,vertical=0.dp),modifier=Modifier.height(30.dp)
+            ){Text("Ver liquidação · $settledExpenseCount despesas",color=Green,style=MaterialTheme.typography.labelSmall)}
         }
         Column(horizontalAlignment=Alignment.End){Text("${if(expense)"−" else "+"}${money(kotlin.math.abs(t.amount))}",color=color,fontWeight=FontWeight.Bold);Text(SimpleDateFormat("dd MMM",Locale("pt","PT")).format(Date(t.date)),color=Muted,style=MaterialTheme.typography.labelSmall)}
     }
@@ -711,12 +743,13 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun BudgetAssignmentDialog(
-    transaction:FinanceTransaction,budgets:List<Budget>,assign:(FinanceTransaction,Long)->Unit,close:()->Unit
+    transaction:FinanceTransaction,budgets:List<Budget>,assign:(FinanceTransaction,Long,Boolean)->Unit,close:()->Unit
 ){
     val movementMonth=currentMonthStart(transaction.date)
     val availableBudgets=budgets.filter{budgetVisibleInMonth(it,movementMonth)}
     var budgetId by remember(transaction.id){mutableLongStateOf(0L)}
     var expanded by remember{mutableStateOf(false)}
+    var rememberForFuture by remember(transaction.id){mutableStateOf(false)}
     val selectedBudget=availableBudgets.firstOrNull{it.id==budgetId}
     AlertDialog(
         onDismissRequest=close,
@@ -736,10 +769,71 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
                         availableBudgets.forEach{budget->DropdownMenuItem(text={Text(budget.name)},onClick={budgetId=budget.id;expanded=false})}
                     }
                 }
+                if(normalizeMovementKey(transaction.title).isNotBlank()) Row(verticalAlignment=Alignment.CenterVertically){
+                    Checkbox(checked=rememberForFuture,onCheckedChange={rememberForFuture=it})
+                    Text("Definir como orçamento por defeito para este descritivo",color=Ink,style=MaterialTheme.typography.bodySmall)
+                }
             }
         },
-        confirmButton={TextButton(onClick={selectedBudget?.let{assign(transaction,it.id);close()}},enabled=selectedBudget!=null){Text("Associar",color=Green)}},
+        confirmButton={TextButton(onClick={selectedBudget?.let{assign(transaction,it.id,rememberForFuture);close()}},enabled=selectedBudget!=null){Text("Associar",color=Green)}},
         dismissButton={TextButton(onClick=close){Text("Cancelar",color=Muted)}}
+    )
+}
+
+@Composable private fun SettleIncomeDialog(
+    income:FinanceTransaction,expenses:List<FinanceTransaction>,settle:(Set<Long>,(Boolean)->Unit)->Unit,close:()->Unit
+){
+    val sortedExpenses=expenses.sortedWith(compareByDescending<FinanceTransaction>{it.date}.thenByDescending{it.id})
+    var selectedIds by remember(income.id){mutableStateOf<Set<Long>>(emptySet())}
+    var saving by remember(income.id){mutableStateOf(false)}
+    var error by remember(income.id){mutableStateOf("")}
+    val dateFormat=remember{SimpleDateFormat("dd MMM yyyy",Locale("pt","PT"))}
+    fun toggle(id:Long){selectedIds=if(id in selectedIds)selectedIds-id else selectedIds+id}
+    AlertDialog(
+        onDismissRequest={if(!saving)close()},
+        title={Text("Liquidar receita",color=Ink,fontWeight=FontWeight.Bold)},
+        text={Column(Modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(8.dp)){
+            Text("Receita: ${income.title.ifBlank{"Receita"}} · ${money(income.amount)}",color=Ink,fontWeight=FontWeight.SemiBold)
+            Text("Seleciona as despesas ativas sem orçamento associadas a esta receita. Ao confirmar, a receita e as despesas selecionadas ficam inativas.",color=Muted,style=MaterialTheme.typography.bodySmall)
+            if(sortedExpenses.isEmpty()) Text("Não existem despesas ativas sem orçamento para liquidar.",color=Muted)
+            else Column(Modifier.heightIn(max=360.dp).verticalScroll(rememberScrollState())){
+                sortedExpenses.forEach{expense->
+                    Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){
+                        Checkbox(checked=expense.id in selectedIds,onCheckedChange={toggle(expense.id)},enabled=!saving)
+                        Column(Modifier.weight(1f)){
+                            Text(expense.title.ifBlank{"Despesa"},color=Ink,fontWeight=FontWeight.SemiBold)
+                            Text("${money(expense.amount)} · ${dateFormat.format(Date(expense.date))}",color=Muted,style=MaterialTheme.typography.labelSmall)
+                        }
+                    }
+                }
+            }
+            if(error.isNotBlank()) Text(error,color=Coral,style=MaterialTheme.typography.bodySmall)
+        }},
+        confirmButton={TextButton(enabled=!saving&&selectedIds.isNotEmpty(),onClick={
+            saving=true;error=""
+            settle(selectedIds){success->saving=false;if(success)close() else error="Não foi possível liquidar. Confirma que a receita e as despesas continuam ativas."}
+        }){Text(if(saving)"A liquidar…" else "Confirmar liquidação",color=Green,fontWeight=FontWeight.Bold)}},
+        dismissButton={TextButton(onClick=close,enabled=!saving){Text("Cancelar",color=Muted)}}
+    )
+}
+
+@Composable private fun SettledExpensesDialog(income:FinanceTransaction,expenses:List<FinanceTransaction>,close:()->Unit){
+    val sortedExpenses=expenses.sortedWith(compareBy<FinanceTransaction>{it.date}.thenBy{it.id})
+    val dateFormat=remember{SimpleDateFormat("dd MMM yyyy",Locale("pt","PT"))}
+    AlertDialog(
+        onDismissRequest=close,
+        title={Text("Despesas associadas",color=Ink,fontWeight=FontWeight.Bold)},
+        text={Column(Modifier.heightIn(max=440.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(10.dp)){
+            Text("Receita: ${income.title.ifBlank{"Receita"}} · ${money(income.amount)}",color=Ink,fontWeight=FontWeight.SemiBold)
+            Text("${sortedExpenses.size} despesas liquidadas",color=Muted,style=MaterialTheme.typography.bodySmall)
+            sortedExpenses.forEach{expense->
+                Column(Modifier.fillMaxWidth().background(Paper,RoundedCornerShape(12.dp)).padding(10.dp)){
+                    Text(expense.title.ifBlank{"Despesa"},color=Ink,fontWeight=FontWeight.SemiBold)
+                    Text("−${money(kotlin.math.abs(expense.amount))} · ${dateFormat.format(Date(expense.date))}",color=Coral,style=MaterialTheme.typography.bodySmall)
+                }
+            }
+        }},
+        confirmButton={TextButton(onClick=close){Text("Fechar",color=Green,fontWeight=FontWeight.Bold)}}
     )
 }
 

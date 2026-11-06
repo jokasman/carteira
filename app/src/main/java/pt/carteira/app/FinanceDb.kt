@@ -9,7 +9,7 @@ import kotlinx.coroutines.flow.Flow
 @Entity(tableName = "accounts")
 data class Account(@PrimaryKey(autoGenerate = true) val id: Long = 0, val name: String, val type: String = "Conta", val openingBalance: Double = 0.0, val currency: String = "EUR")
 
-@Entity(tableName = "transactions", indices = [Index(value = ["importKey"], unique = true)])
+@Entity(tableName = "transactions", indices = [Index(value = ["importKey"], unique = true), Index(value = ["settlementRevenueId"])])
 data class FinanceTransaction(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val title: String,
@@ -24,7 +24,8 @@ data class FinanceTransaction(
     val budgetId: Long? = null,
     val importKey: String? = null,
     @ColumnInfo(defaultValue = "1") val active: Boolean = true,
-    @ColumnInfo(defaultValue = "0") val importedFromCsv: Boolean = false
+    @ColumnInfo(defaultValue = "0") val importedFromCsv: Boolean = false,
+    val settlementRevenueId: Long? = null
 )
 
 @Entity(tableName = "budgets")
@@ -54,6 +55,8 @@ data class BudgetPeriod(val budgetId: Long, val monthStart: Long, val limitAmoun
     @Query("SELECT * FROM accounts WHERE id = :id LIMIT 1") suspend fun accountById(id: Long): Account?
     @Query("SELECT * FROM accounts ORDER BY id LIMIT 1") suspend fun firstAccount(): Account?
     @Query("SELECT * FROM transactions ORDER BY date DESC, id DESC") fun transactions(): Flow<List<FinanceTransaction>>
+    @Query("SELECT * FROM transactions WHERE id = :id LIMIT 1") suspend fun transactionById(id: Long): FinanceTransaction?
+    @Query("SELECT * FROM transactions WHERE id IN (:ids)") suspend fun transactionsByIds(ids: List<Long>): List<FinanceTransaction>
     @Query("SELECT * FROM budgets ORDER BY name") fun budgets(): Flow<List<Budget>>
     @Query("SELECT * FROM budgets ORDER BY id") suspend fun allBudgets(): List<Budget>
     @Query("SELECT * FROM budgets WHERE id = :id LIMIT 1") suspend fun budgetById(id: Long): Budget?
@@ -77,6 +80,10 @@ data class BudgetPeriod(val budgetId: Long, val monthStart: Long, val limitAmoun
         updateTransaction(first)
         addTransaction(second)
     }
+    @Transaction suspend fun settleIncome(income: FinanceTransaction, expenses: List<FinanceTransaction>) {
+        updateTransaction(income.copy(active = false))
+        expenses.forEach { expense -> updateTransaction(expense.copy(active = false, settlementRevenueId = income.id)) }
+    }
     @Insert suspend fun addBudget(value: Budget): Long
     @Update suspend fun updateBudget(value: Budget)
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun saveBudgetRule(value: BudgetRule)
@@ -84,11 +91,21 @@ data class BudgetPeriod(val budgetId: Long, val monthStart: Long, val limitAmoun
     @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun addCategories(values: List<Category>)
     @Delete suspend fun deleteTransaction(value: FinanceTransaction)
     @Delete suspend fun deleteTransactions(values: List<FinanceTransaction>)
+    @Query("UPDATE transactions SET settlementRevenueId = NULL WHERE settlementRevenueId IN (:incomeIds)") suspend fun clearSettlementLinks(incomeIds: List<Long>)
+    @Transaction suspend fun deleteTransactionAndClearSettlement(value: FinanceTransaction) {
+        if (value.kind == "Receita") clearSettlementLinks(listOf(value.id))
+        deleteTransaction(value)
+    }
+    @Transaction suspend fun deleteTransactionsAndClearSettlement(values: List<FinanceTransaction>) {
+        val incomeIds = values.filter { it.kind == "Receita" }.map { it.id }
+        if (incomeIds.isNotEmpty()) clearSettlementLinks(incomeIds)
+        deleteTransactions(values)
+    }
     @Delete suspend fun deleteBudget(value: Budget)
     @Query("SELECT COUNT(*) FROM accounts") suspend fun accountCount(): Int
 }
 
-@Database(entities = [Account::class, FinanceTransaction::class, Budget::class, Category::class, BudgetPeriod::class, BudgetRule::class], version = 9, exportSchema = false)
+@Database(entities = [Account::class, FinanceTransaction::class, Budget::class, Category::class, BudgetPeriod::class, BudgetRule::class], version = 10, exportSchema = false)
 abstract class FinanceDb : RoomDatabase() {
     abstract fun dao(): FinanceDao
     companion object {
@@ -165,9 +182,15 @@ abstract class FinanceDb : RoomDatabase() {
                 db.execSQL("UPDATE transactions SET importedFromCsv = 1 WHERE importKey IS NOT NULL")
             }
         }
+        private val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE transactions ADD COLUMN settlementRevenueId INTEGER")
+                db.execSQL("CREATE INDEX index_transactions_settlementRevenueId ON transactions(settlementRevenueId)")
+            }
+        }
         fun get(context: Context): FinanceDb = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext, FinanceDb::class.java, "carteira.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10)
                 .build().also { instance = it }
         }
     }
