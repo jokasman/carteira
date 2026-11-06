@@ -1,7 +1,6 @@
 package pt.carteira.app
 
 import android.os.Bundle
-import android.app.DatePickerDialog
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -619,53 +618,32 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun DateFilterDialog(
     initialStart:Long?,initialEnd:Long?,apply:(Long?,Long?)->Unit,clear:()->Unit,close:()->Unit
 ){
-    val context=LocalContext.current
-    var startDate by remember(initialStart,initialEnd){mutableStateOf(initialStart)}
-    var endDate by remember(initialStart,initialEnd){mutableStateOf(initialEnd)}
-    var error by remember{mutableStateOf("")}
-    val dateFormatter=remember{SimpleDateFormat("dd/MM/yyyy",Locale("pt","PT"))}
-    fun pickDate(initial:Long?,onDate:(Long)->Unit){
-        val calendar=Calendar.getInstance().apply{if(initial!=null)timeInMillis=initial}
-        DatePickerDialog(
-            context,
-            {_,year,month,day->
-                val selected=Calendar.getInstance().apply{
-                    clear()
-                    set(year,month,day,0,0,0)
-                    set(Calendar.MILLISECOND,0)
-                }
-                onDate(selected.timeInMillis)
-            },
-            calendar.get(Calendar.YEAR),calendar.get(Calendar.MONTH),calendar.get(Calendar.DAY_OF_MONTH)
-        ).show()
-    }
-    AlertDialog(
+    val state=rememberDateRangePickerState(
+        initialSelectedStartDateMillis=initialStart?.let(::localDateToPickerMillis),
+        initialSelectedEndDateMillis=initialEnd?.let(::localDateToPickerMillis)
+    )
+    DatePickerDialog(
         onDismissRequest=close,
-        title={Text("Filtrar por data",color=Ink,fontWeight=FontWeight.Bold)},
-        text={Column(verticalArrangement=Arrangement.spacedBy(10.dp)){
-            Text("Define o intervalo de datas. Podes preencher só uma das datas.",color=Muted)
-            OutlinedButton(onClick={pickDate(startDate){startDate=it;error=""}},modifier=Modifier.fillMaxWidth()){
-                Icon(Icons.Default.CalendarMonth,null,tint=Green);Spacer(Modifier.width(8.dp))
-                Text(startDate?.let{"Desde ${dateFormatter.format(Date(it))}"}?:"Data inicial",color=Ink)
-            }
-            OutlinedButton(onClick={pickDate(endDate){endDate=it;error=""}},modifier=Modifier.fillMaxWidth()){
-                Icon(Icons.Default.CalendarMonth,null,tint=Green);Spacer(Modifier.width(8.dp))
-                Text(endDate?.let{"Até ${dateFormatter.format(Date(it))}"}?:"Data final",color=Ink)
-            }
-            if(error.isNotBlank()) Text(error,color=Coral,style=MaterialTheme.typography.bodySmall)
-        }},
-        confirmButton={TextButton(onClick={
-            if(startDate!=null&&endDate!=null&&startDate!!>endDate!!) error="A data inicial tem de ser anterior à data final."
-            else apply(startDate,endDate)
-        }){Text("Aplicar",color=Green,fontWeight=FontWeight.Bold)}},
+        confirmButton={TextButton(
+            onClick={apply(state.selectedStartDateMillis?.let(::pickerDateToLocalStart),state.selectedEndDateMillis?.let(::pickerDateToLocalStart))},
+            enabled=state.selectedStartDateMillis!=null||state.selectedEndDateMillis!=null
+        ){Text("Aplicar",color=Green,fontWeight=FontWeight.Bold)}},
         dismissButton={Row{
             TextButton(onClick=clear){Text("Limpar",color=Coral)}
             TextButton(onClick=close){Text("Cancelar",color=Muted)}
         }}
-    )
+    ){
+        DateRangePicker(
+            state=state,
+            title={Text("Filtrar por data",color=Ink,fontWeight=FontWeight.Bold)},
+            showModeToggle=false,
+            modifier=Modifier.fillMaxWidth().height(500.dp).padding(8.dp)
+        )
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -971,6 +949,22 @@ private fun endOfDay(timestamp:Long):Long = Calendar.getInstance().apply{
     timeInMillis=timestamp
     set(Calendar.HOUR_OF_DAY,23);set(Calendar.MINUTE,59);set(Calendar.SECOND,59);set(Calendar.MILLISECOND,999)
 }.timeInMillis
+private fun localDateToPickerMillis(timestamp:Long):Long {
+    val local=Calendar.getInstance().apply{timeInMillis=timestamp}
+    return Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply{
+        clear()
+        set(local.get(Calendar.YEAR),local.get(Calendar.MONTH),local.get(Calendar.DAY_OF_MONTH),0,0,0)
+        set(Calendar.MILLISECOND,0)
+    }.timeInMillis
+}
+private fun pickerDateToLocalStart(timestamp:Long):Long {
+    val utc=Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply{timeInMillis=timestamp}
+    return Calendar.getInstance().apply{
+        clear()
+        set(utc.get(Calendar.YEAR),utc.get(Calendar.MONTH),utc.get(Calendar.DAY_OF_MONTH),0,0,0)
+        set(Calendar.MILLISECOND,0)
+    }.timeInMillis
+}
 private fun shiftMonth(monthStart:Long,offset:Int):Long = Calendar.getInstance().apply {
     timeInMillis=monthStart
     add(Calendar.MONTH,offset)
