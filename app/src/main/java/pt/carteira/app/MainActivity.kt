@@ -96,6 +96,8 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
     }
     fun saveTransaction(value: FinanceTransaction, rememberBudgetRule:Boolean=false, onComplete:(Boolean)->Unit = {}) = viewModelScope.launch {
         val saved = try {
+            val current=if(value.id>0)dao.transactionById(value.id)else null
+            val settlementLocked=current?.settlementRevenueId!=null||current?.let{it.kind=="Receita"&&dao.settlementExpenses(it.id).isNotEmpty()}==true
             val source = dao.accountById(value.accountId) ?: ensureDefaultAccount()
             val ruleKey=normalizeMovementKey(value.title)
             val matchedBudget=if(value.kind=="Despesa"&&value.budgetId==null&&ruleKey.isNotBlank()) dao.budgetRule(ruleKey)?.let{rule->dao.budgetById(rule.budgetId)} else null
@@ -109,7 +111,7 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
                 (candidate.toAccountId != null && candidate.toAccountId != source.id && dao.accountById(candidate.toAccountId) != null)
             val validAmount=candidate.amount.isFinite() && (if(candidate.kind=="Ajuste") kotlin.math.abs(candidate.amount)>=0.01 else candidate.amount>=0.01)
             val importedWithoutBudget=candidate.kind=="Despesa"&&candidate.budgetId==null&&(candidate.importedFromCsv||candidate.importKey!=null)
-            if (candidate.kind !in listOf("Despesa", "Receita", "Transferência", "Ajuste") ||
+            if (settlementLocked || candidate.kind !in listOf("Despesa", "Receita", "Transferência", "Ajuste") ||
                 !validAmount ||
                 candidate.category.isBlank() || !dao.categoryExists(candidate.category, candidate.kind) ||
                 (!validBudget&&!importedWithoutBudget) || !validDestination) false
@@ -230,11 +232,25 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
         catch(_:Exception){false}
         onComplete(settled)
     }
+    fun undoIncomeSettlement(incomeId:Long,onComplete:(Boolean)->Unit) = viewModelScope.launch {
+        val undone=try {
+            val income=dao.transactionById(incomeId)
+            val expenses=dao.settlementExpenses(incomeId)
+            val valid=income!=null&&income.kind=="Receita"&&!income.active&&expenses.isNotEmpty()&&expenses.all{
+                it.kind=="Despesa"&&!it.active&&it.settlementRevenueId==incomeId
+            }
+            if(valid){dao.undoIncomeSettlement(income!!,expenses);true}else false
+        } catch(cancelled:CancellationException){throw cancelled}
+        catch(_:Exception){false}
+        onComplete(undone)
+    }
     fun splitTransaction(
         original:FinanceTransaction,firstAmount:Double,secondAmount:Double,firstTitle:String,secondTitle:String,
         firstBudgetId:Long?,secondBudgetId:Long?,onComplete:(Boolean)->Unit
     ) = viewModelScope.launch {
         val split = try {
+            val stored=dao.transactionById(original.id)
+            val settlementLocked=stored?.settlementRevenueId!=null||stored?.let{it.kind=="Receita"&&dao.settlementExpenses(it.id).isNotEmpty()}==true
             fun rounded(value:Double)=BigDecimal.valueOf(value).setScale(2,RoundingMode.HALF_UP).toDouble()
             val first=rounded(firstAmount);val second=rounded(secondAmount);val total=rounded(kotlin.math.abs(original.amount))
             suspend fun validBudget(id:Long?):Boolean {
@@ -245,7 +261,7 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
             val validBudgets=if(original.kind=="Despesa") validBudget(firstBudgetId)&&validBudget(secondBudgetId)
                 else firstBudgetId==null&&secondBudgetId==null
             val sumMatches=BigDecimal.valueOf(first).add(BigDecimal.valueOf(second)).compareTo(BigDecimal.valueOf(total))==0
-            if(original.id<=0||!first.isFinite()||!second.isFinite()||first<0.01||second<0.01||!sumMatches||!validBudgets) false
+            if(settlementLocked||original.id<=0||!first.isFinite()||!second.isFinite()||first<0.01||second<0.01||!sumMatches||!validBudgets) false
             else {
                 val sign=if(original.amount<0)-1 else 1
                 val firstMovement=original.copy(
@@ -291,6 +307,7 @@ class MainActivity : ComponentActivity() {
     var pendingSplit by remember { mutableStateOf<FinanceTransaction?>(null) }
     var pendingSettlementIncome by remember { mutableStateOf<FinanceTransaction?>(null) }
     var pendingSettlementDetails by remember { mutableStateOf<FinanceTransaction?>(null) }
+    var pendingUndoSettlement by remember { mutableStateOf<FinanceTransaction?>(null) }
     var selectedMovementIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
     var pendingEdit by remember { mutableStateOf<FinanceTransaction?>(null) }
     var pendingAccountEdit by remember { mutableStateOf<Account?>(null) }
@@ -357,7 +374,7 @@ class MainActivity : ComponentActivity() {
             val candidates=transactions.filter{(it.kind=="Despesa"&&it.active&&it.budgetId==null&&it.settlementRevenueId==null)||it.settlementRevenueId==income.id}
             SettleIncomeDialog(income,candidates,linked.map{it.id}.toSet(),{selectedIds,done->model.settleIncome(income.id,selectedIds,done)},{pendingSettlementIncome=null;dialog=""})
         }
-        "ver-liquidacao" -> pendingSettlementDetails?.let{income->SettledExpensesDialog(income,transactions.filter{it.settlementRevenueId==income.id},{pendingSettlementDetails=null;pendingSettlementIncome=income;dialog="liquidar-receita"},{pendingSettlementDetails=null;dialog=""})}
+        "ver-liquidacao" -> pendingSettlementDetails?.let{income->SettledExpensesDialog(income,transactions.filter{it.settlementRevenueId==income.id},{pendingSettlementDetails=null;pendingSettlementIncome=income;dialog="liquidar-receita"},{pendingSettlementDetails=null;pendingUndoSettlement=income;dialog=""},{pendingSettlementDetails=null;dialog=""})}
         "atribuir-orçamento" -> pendingBudgetAssignment?.let{transaction->BudgetAssignmentDialog(transaction,budgets,{value,budgetId,remember->model.assignBudget(value,budgetId,remember);pendingBudgetAssignment=null;dialog=""},{pendingBudgetAssignment=null;dialog=""})}
         "conta" -> AccountDialog(null,0.0, {value->model.saveAccount(value);dialog=""}, {dialog=""}, {})
         "editar-conta" -> AccountDialog(pendingAccountEdit, pendingAccountEdit?.let{accountBalance(it,transactions)}?:0.0, {value->model.saveAccount(value);pendingAccountEdit=null;dialog=""}, {pendingAccountEdit=null;dialog=""}, {account->adjustmentAccount=account;pendingAccountEdit=null;dialog="acerto-conta"})
@@ -382,6 +399,26 @@ class MainActivity : ComponentActivity() {
             text={Text(if(selected.size==1)"O movimento selecionado será removido da carteira." else "Os ${selected.size} movimentos selecionados serão removidos da carteira.",color=Muted)},
             confirmButton={TextButton(onClick={model.deleteTransactions(selected);selectedMovementIds=emptySet();pendingBulkDelete=null}){Text("Eliminar",color=Coral)}},
             dismissButton={TextButton(onClick={pendingBulkDelete=null}){Text("Cancelar",color=Green)}}
+        )
+    }
+    pendingUndoSettlement?.let { income ->
+        var undoing by remember(income.id){mutableStateOf(false)}
+        var error by remember(income.id){mutableStateOf("")}
+        AlertDialog(
+            onDismissRequest={if(!undoing){pendingUndoSettlement=null;dialog=""}},
+            title={Text("Desfazer liquidação?",color=Ink,fontWeight=FontWeight.Bold)},
+            text={Column(verticalArrangement=Arrangement.spacedBy(6.dp)){
+                Text("A receita e as despesas associadas voltarão a ficar ativas e a ligação entre elas será removida.",color=Muted)
+                if(error.isNotBlank())Text(error,color=Coral,style=MaterialTheme.typography.bodySmall)
+            }},
+            confirmButton={TextButton(enabled=!undoing,onClick={
+                undoing=true
+                model.undoIncomeSettlement(income.id){success->
+                    undoing=false
+                    if(success){pendingUndoSettlement=null;dialog=""}else error="Não foi possível desfazer esta liquidação."
+                }
+            }){Text(if(undoing)"A desfazer…" else "Desfazer liquidação",color=Coral,fontWeight=FontWeight.Bold)}},
+            dismissButton={TextButton(enabled=!undoing,onClick={pendingUndoSettlement=null;dialog=""}){Text("Cancelar",color=Muted)}}
         )
     }
     pendingBudgetArchive?.let { budget ->
@@ -429,7 +466,11 @@ class MainActivity : ComponentActivity() {
         else items(activeBudgets.take(3)) { b -> BudgetRow(b, tx, budgetPeriods, currentMonthStart()) { openBudget(b) } }
         item { SectionTitle("Movimentos recentes", "Ver todos", {navigate("Movimentos")}) }
         if(tx.isEmpty()) item { EmptyCard("Tudo começa aqui", "Regista a tua primeira receita ou despesa.", "Adicionar movimento", addMovement) }
-        else items(tx.take(5)) { TransactionRow(it,accounts,requestDelete,requestEdit,budgets) }
+        else items(tx.take(5),key={it.id}) { movement ->
+            val expenseCount=if(movement.kind=="Receita")tx.count{it.settlementRevenueId==movement.id}else 0
+            val settlementIncome=movement.settlementRevenueId?.let{id->tx.firstOrNull{it.id==id}}
+            TransactionRow(movement,accounts,requestDelete,requestEdit,budgets,settledExpenseCount=expenseCount,settlementIncome=settlementIncome,settlementIncomeTitle=settlementIncome?.title?.takeIf{it.isNotBlank()})
+        }
     }
 }
 
@@ -708,9 +749,13 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
     settlementIncome:FinanceTransaction?=null
 ){
     val expense=t.kind=="Despesa"||t.kind=="Transferência"||(t.kind=="Ajuste"&&t.amount<0); val color=if(!t.active)Muted else if(expense)Coral else Green
+    val settlementLocked=t.settlementRevenueId!=null||settledExpenseCount>0
     val budgetLabel=if(t.kind=="Despesa")if(t.budgetId==null)"Sem orçamento" else budgets.firstOrNull{it.id==t.budgetId}?.name?:"Orçamento" else null
     Row(Modifier.fillMaxWidth().background(if(selected)Mint else if(t.active)Color.White else Color(0xFFF0F2EF),RoundedCornerShape(17.dp)).combinedClickable(
-        onClick={if(selectionMode)onSelect?.invoke() else edit(t)},
+        onClick={if(selectionMode)onSelect?.invoke() else if(settlementLocked){
+            if(t.settlementRevenueId!=null)settlementIncome?.let{viewSettlement?.invoke(it)}
+            else viewSettlement?.invoke(t)
+        }else edit(t)},
         onLongClick={if(onSelect!=null)onSelect() else delete(t)}
     ).padding(14.dp),verticalAlignment=Alignment.CenterVertically){
         Box(Modifier.size(42.dp).background(if(selectionMode||!t.active)Color.White else if(expense)Color(0xFFFFEFEC) else Mint,CircleShape),contentAlignment=Alignment.Center){
@@ -849,7 +894,7 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
     )
 }
 
-@Composable private fun SettledExpensesDialog(income:FinanceTransaction,expenses:List<FinanceTransaction>,edit:()->Unit,close:()->Unit){
+@Composable private fun SettledExpensesDialog(income:FinanceTransaction,expenses:List<FinanceTransaction>,edit:()->Unit,undo:()->Unit,close:()->Unit){
     val sortedExpenses=expenses.sortedWith(compareBy<FinanceTransaction>{it.date}.thenBy{it.id})
     val dateFormat=remember{SimpleDateFormat("dd MMM yyyy",Locale("pt","PT"))}
     AlertDialog(
@@ -863,6 +908,9 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
                     Text(expense.title.ifBlank{"Despesa"},color=Ink,fontWeight=FontWeight.SemiBold)
                     Text("−${money(kotlin.math.abs(expense.amount))} · ${dateFormat.format(Date(expense.date))}",color=Coral,style=MaterialTheme.typography.bodySmall)
                 }
+            }
+            OutlinedButton(onClick=undo,modifier=Modifier.fillMaxWidth(),colors=ButtonDefaults.outlinedButtonColors(contentColor=Coral)){
+                Icon(Icons.Default.Undo,null);Spacer(Modifier.width(6.dp));Text("Desfazer liquidação")
             }
         }},
         confirmButton={Row{

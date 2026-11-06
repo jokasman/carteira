@@ -89,6 +89,10 @@ data class BudgetPeriod(val budgetId: Long, val monthStart: Long, val limitAmoun
         updateTransaction(income.copy(active = false))
         expenses.forEach { expense -> updateTransaction(expense.copy(active = false, settlementRevenueId = income.id)) }
     }
+    @Transaction suspend fun undoIncomeSettlement(income: FinanceTransaction, expenses: List<FinanceTransaction>) {
+        updateTransaction(income.copy(active = true))
+        expenses.forEach { expense -> updateTransaction(expense.copy(active = true, settlementRevenueId = null)) }
+    }
     @Insert suspend fun addBudget(value: Budget): Long
     @Update suspend fun updateBudget(value: Budget)
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun saveBudgetRule(value: BudgetRule)
