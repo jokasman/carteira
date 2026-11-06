@@ -1,6 +1,7 @@
 package pt.carteira.app
 
 import android.os.Bundle
+import android.app.DatePickerDialog
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -379,6 +380,9 @@ class MainActivity : ComponentActivity() {
 ){
     var kindFilter by remember{mutableStateOf("Todos")}
     var budgetFilter by remember{mutableStateOf("Todos")}
+    var dateFrom by remember{mutableStateOf<Long?>(null)}
+    var dateTo by remember{mutableStateOf<Long?>(null)}
+    var showDateFilter by remember{mutableStateOf(false)}
     var sort by remember{mutableStateOf("Mais recentes")}
     var sortExpanded by remember{mutableStateOf(false)}
     val filtered=tx.filter{transaction->
@@ -388,7 +392,8 @@ class MainActivity : ComponentActivity() {
             "Com orçamento"->transaction.kind=="Despesa"&&transaction.budgetId!=null
             else->true
         }
-        typeMatches&&budgetMatches
+        val dateMatches=(dateFrom==null||transaction.date>=dateFrom!!) && (dateTo==null||transaction.date<=endOfDay(dateTo!!))
+        typeMatches&&budgetMatches&&dateMatches
     }.let{list->when(sort){
         "Mais antigos"->list.sortedWith(compareBy<FinanceTransaction>{it.date}.thenBy{it.id})
         "Maior valor"->list.sortedWith(compareByDescending<FinanceTransaction>{kotlin.math.abs(it.amount)}.thenByDescending{it.date})
@@ -397,12 +402,29 @@ class MainActivity : ComponentActivity() {
     }}
     val selectedMovements=tx.filter{it.id in selectedIds}
     val selectionMode=selectedIds.isNotEmpty()
+    val visibleIds=filtered.map{it.id}.toSet()
+    val allVisibleSelected=visibleIds.isNotEmpty()&&visibleIds.all{it in selectedIds}
+    val dateFormatter=remember{SimpleDateFormat("dd/MM/yyyy",Locale("pt","PT"))}
+    val dateFilterLabel=when{
+        dateFrom==null&&dateTo==null->"Todas as datas"
+        dateFrom==null->"Até ${dateFormatter.format(Date(dateTo!!))}"
+        dateTo==null->"Desde ${dateFormatter.format(Date(dateFrom!!))}"
+        else->"${dateFormatter.format(Date(dateFrom!!))} – ${dateFormatter.format(Date(dateTo!!))}"
+    }
     Column(modifier.fillMaxSize().padding(horizontal=16.dp)){
-        if(selectionMode) Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){
-            TextButton(onClick={onSelectionChange(emptySet())}){Text("Cancelar",color=Green)}
-            Text("${selectedMovements.size} selecionado(s)",Modifier.weight(1f),color=Muted,style=MaterialTheme.typography.labelMedium,textAlign=TextAlign.Center)
-            Button(onClick={requestDeleteSelected(selectedMovements)},enabled=selectedMovements.isNotEmpty(),colors=ButtonDefaults.buttonColors(containerColor=Coral),contentPadding=PaddingValues(horizontal=12.dp,vertical=8.dp)){
-                Icon(Icons.Default.Delete,null,modifier=Modifier.size(18.dp));Spacer(Modifier.width(5.dp));Text("Eliminar")
+        if(selectionMode) Column {
+            Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){
+                TextButton(onClick={onSelectionChange(emptySet())}){Text("Cancelar",color=Green)}
+                Text("${selectedMovements.size} selecionado(s)",Modifier.weight(1f),color=Muted,style=MaterialTheme.typography.labelMedium,textAlign=TextAlign.Center)
+                Button(onClick={requestDeleteSelected(selectedMovements)},enabled=selectedMovements.isNotEmpty(),colors=ButtonDefaults.buttonColors(containerColor=Coral),contentPadding=PaddingValues(horizontal=12.dp,vertical=8.dp)){
+                    Icon(Icons.Default.Delete,null,modifier=Modifier.size(18.dp));Spacer(Modifier.width(5.dp));Text("Eliminar")
+                }
+            }
+            Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.End){
+                TextButton(onClick={onSelectionChange(if(allVisibleSelected)emptySet() else visibleIds)},enabled=visibleIds.isNotEmpty()){
+                    Icon(if(allVisibleSelected)Icons.Default.Deselect else Icons.Default.SelectAll,null,tint=Green)
+                    Spacer(Modifier.width(5.dp));Text(if(allVisibleSelected)"Desmarcar todos" else "Selecionar todos",color=Green)
+                }
             }
         } else Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){
             Text("Filtrar e ordenar movimentos",Modifier.weight(1f),color=Muted,style=MaterialTheme.typography.labelSmall)
@@ -413,6 +435,13 @@ class MainActivity : ComponentActivity() {
         }
         Row(horizontalArrangement=Arrangement.spacedBy(7.dp),modifier=Modifier.horizontalScroll(rememberScrollState()).padding(bottom=5.dp)){
             listOf("Todos","Com orçamento","Sem orçamento").forEach{option->AssistChip(onClick={budgetFilter=option},label={Text(option)},colors=AssistChipDefaults.assistChipColors(containerColor=if(budgetFilter==option)Mint else Color.White))}
+        }
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(bottom=4.dp)){
+            FilterChip(
+                selected=dateFrom!=null||dateTo!=null,onClick={showDateFilter=true},
+                label={Text(dateFilterLabel)},leadingIcon={Icon(Icons.Default.CalendarMonth,null,modifier=Modifier.size(18.dp))},
+                colors=FilterChipDefaults.filterChipColors(selectedContainerColor=Mint)
+            )
         }
         Box(Modifier.align(Alignment.End)){
             TextButton(onClick={sortExpanded=true}){Icon(Icons.Default.Sort,null,tint=Green);Spacer(Modifier.width(5.dp));Text(sort,color=Green)}
@@ -432,6 +461,7 @@ class MainActivity : ComponentActivity() {
             )
         }}
     }
+    if(showDateFilter) DateFilterDialog(dateFrom,dateTo,{from,to->dateFrom=from;dateTo=to;showDateFilter=false},{dateFrom=null;dateTo=null;showDateFilter=false},{showDateFilter=false})
 }
 @Composable private fun AccountsPage(modifier:Modifier,accounts:List<Account>,tx:List<FinanceTransaction>,add:()->Unit,edit:(Account)->Unit){Column(modifier.fillMaxSize().padding(20.dp)){Row(verticalAlignment=Alignment.CenterVertically){Text("Contas e carteiras",Modifier.weight(1f),style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold,color=Ink);TextButton(onClick=add){Text("+ Adicionar")}};Spacer(Modifier.height(8.dp));accounts.forEach{account->AccountDetail(account,tx){edit(account)};Spacer(Modifier.height(10.dp))}}}
 @Composable private fun AccountDetail(a:Account,tx:List<FinanceTransaction>,edit:()->Unit){val bal=accountBalance(a,tx);Row(Modifier.fillMaxWidth().background(Color.White,RoundedCornerShape(18.dp)).padding(start=18.dp,top=12.dp,bottom=12.dp,end=8.dp),verticalAlignment=Alignment.CenterVertically){Icon(Icons.Default.AccountBalanceWallet,null,tint=Green,modifier=Modifier.size(40.dp));Column(Modifier.weight(1f).padding(start=14.dp)){Text(a.name,color=Ink,fontWeight=FontWeight.Bold);Text(a.type,color=Muted,style=MaterialTheme.typography.bodySmall)};Text(money(bal),color=Ink,fontWeight=FontWeight.Bold);IconButton(onClick=edit){Icon(Icons.Default.Edit,"Editar conta",tint=Green)}} }
@@ -587,6 +617,55 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
         }
         Column(horizontalAlignment=Alignment.End){Text("${if(expense)"−" else "+"}${money(kotlin.math.abs(t.amount))}",color=color,fontWeight=FontWeight.Bold);Text(SimpleDateFormat("dd MMM",Locale("pt","PT")).format(Date(t.date)),color=Muted,style=MaterialTheme.typography.labelSmall)}
     }
+}
+
+@Composable private fun DateFilterDialog(
+    initialStart:Long?,initialEnd:Long?,apply:(Long?,Long?)->Unit,clear:()->Unit,close:()->Unit
+){
+    val context=LocalContext.current
+    var startDate by remember(initialStart,initialEnd){mutableStateOf(initialStart)}
+    var endDate by remember(initialStart,initialEnd){mutableStateOf(initialEnd)}
+    var error by remember{mutableStateOf("")}
+    val dateFormatter=remember{SimpleDateFormat("dd/MM/yyyy",Locale("pt","PT"))}
+    fun pickDate(initial:Long?,onDate:(Long)->Unit){
+        val calendar=Calendar.getInstance().apply{if(initial!=null)timeInMillis=initial}
+        DatePickerDialog(
+            context,
+            {_,year,month,day->
+                val selected=Calendar.getInstance().apply{
+                    clear()
+                    set(year,month,day,0,0,0)
+                    set(Calendar.MILLISECOND,0)
+                }
+                onDate(selected.timeInMillis)
+            },
+            calendar.get(Calendar.YEAR),calendar.get(Calendar.MONTH),calendar.get(Calendar.DAY_OF_MONTH)
+        ).show()
+    }
+    AlertDialog(
+        onDismissRequest=close,
+        title={Text("Filtrar por data",color=Ink,fontWeight=FontWeight.Bold)},
+        text={Column(verticalArrangement=Arrangement.spacedBy(10.dp)){
+            Text("Define o intervalo de datas. Podes preencher só uma das datas.",color=Muted)
+            OutlinedButton(onClick={pickDate(startDate){startDate=it;error=""}},modifier=Modifier.fillMaxWidth()){
+                Icon(Icons.Default.CalendarMonth,null,tint=Green);Spacer(Modifier.width(8.dp))
+                Text(startDate?.let{"Desde ${dateFormatter.format(Date(it))}"}?:"Data inicial",color=Ink)
+            }
+            OutlinedButton(onClick={pickDate(endDate){endDate=it;error=""}},modifier=Modifier.fillMaxWidth()){
+                Icon(Icons.Default.CalendarMonth,null,tint=Green);Spacer(Modifier.width(8.dp))
+                Text(endDate?.let{"Até ${dateFormatter.format(Date(it))}"}?:"Data final",color=Ink)
+            }
+            if(error.isNotBlank()) Text(error,color=Coral,style=MaterialTheme.typography.bodySmall)
+        }},
+        confirmButton={TextButton(onClick={
+            if(startDate!=null&&endDate!=null&&startDate!!>endDate!!) error="A data inicial tem de ser anterior à data final."
+            else apply(startDate,endDate)
+        }){Text("Aplicar",color=Green,fontWeight=FontWeight.Bold)}},
+        dismissButton={Row{
+            TextButton(onClick=clear){Text("Limpar",color=Coral)}
+            TextButton(onClick=close){Text("Cancelar",color=Muted)}
+        }}
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -887,6 +966,10 @@ private fun currentMonthStart(timestamp:Long=System.currentTimeMillis()):Long = 
     timeInMillis=timestamp
     set(Calendar.DAY_OF_MONTH,1)
     set(Calendar.HOUR_OF_DAY,0);set(Calendar.MINUTE,0);set(Calendar.SECOND,0);set(Calendar.MILLISECOND,0)
+}.timeInMillis
+private fun endOfDay(timestamp:Long):Long = Calendar.getInstance().apply{
+    timeInMillis=timestamp
+    set(Calendar.HOUR_OF_DAY,23);set(Calendar.MINUTE,59);set(Calendar.SECOND,59);set(Calendar.MILLISECOND,999)
 }.timeInMillis
 private fun shiftMonth(monthStart:Long,offset:Int):Long = Calendar.getInstance().apply {
     timeInMillis=monthStart
