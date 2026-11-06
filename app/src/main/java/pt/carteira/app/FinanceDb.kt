@@ -57,6 +57,7 @@ data class BudgetPeriod(val budgetId: Long, val monthStart: Long, val limitAmoun
     @Query("SELECT * FROM transactions ORDER BY date DESC, id DESC") fun transactions(): Flow<List<FinanceTransaction>>
     @Query("SELECT * FROM transactions WHERE id = :id LIMIT 1") suspend fun transactionById(id: Long): FinanceTransaction?
     @Query("SELECT * FROM transactions WHERE id IN (:ids)") suspend fun transactionsByIds(ids: List<Long>): List<FinanceTransaction>
+    @Query("SELECT * FROM transactions WHERE settlementRevenueId = :incomeId ORDER BY date, id") suspend fun settlementExpenses(incomeId: Long): List<FinanceTransaction>
     @Query("SELECT * FROM budgets ORDER BY name") fun budgets(): Flow<List<Budget>>
     @Query("SELECT * FROM budgets ORDER BY id") suspend fun allBudgets(): List<Budget>
     @Query("SELECT * FROM budgets WHERE id = :id LIMIT 1") suspend fun budgetById(id: Long): Budget?
@@ -80,7 +81,11 @@ data class BudgetPeriod(val budgetId: Long, val monthStart: Long, val limitAmoun
         updateTransaction(first)
         addTransaction(second)
     }
-    @Transaction suspend fun settleIncome(income: FinanceTransaction, expenses: List<FinanceTransaction>) {
+    @Transaction suspend fun updateIncomeSettlement(income: FinanceTransaction, previousExpenses: List<FinanceTransaction>, expenses: List<FinanceTransaction>) {
+        val selectedIds = expenses.map { it.id }.toSet()
+        previousExpenses.filter { it.id !in selectedIds }.forEach { expense ->
+            updateTransaction(expense.copy(active = true, settlementRevenueId = null))
+        }
         updateTransaction(income.copy(active = false))
         expenses.forEach { expense -> updateTransaction(expense.copy(active = false, settlementRevenueId = income.id)) }
     }
