@@ -22,7 +22,8 @@ data class FinanceTransaction(
     val recurring: Boolean = false,
     val toAccountId: Long? = null,
     val budgetId: Long? = null,
-    val importKey: String? = null
+    val importKey: String? = null,
+    @ColumnInfo(defaultValue = "1") val active: Boolean = true
 )
 
 @Entity(tableName = "budgets")
@@ -71,6 +72,10 @@ data class BudgetPeriod(val budgetId: Long, val monthStart: Long, val limitAmoun
         if (value.id == 0L) addTransaction(value) else updateTransaction(value)
         if (rule != null) saveBudgetRule(rule)
     }
+    @Transaction suspend fun splitTransaction(first: FinanceTransaction, second: FinanceTransaction) {
+        updateTransaction(first)
+        addTransaction(second)
+    }
     @Insert suspend fun addBudget(value: Budget): Long
     @Update suspend fun updateBudget(value: Budget)
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun saveBudgetRule(value: BudgetRule)
@@ -82,7 +87,7 @@ data class BudgetPeriod(val budgetId: Long, val monthStart: Long, val limitAmoun
     @Query("SELECT COUNT(*) FROM accounts") suspend fun accountCount(): Int
 }
 
-@Database(entities = [Account::class, FinanceTransaction::class, Budget::class, Category::class, BudgetPeriod::class, BudgetRule::class], version = 7, exportSchema = false)
+@Database(entities = [Account::class, FinanceTransaction::class, Budget::class, Category::class, BudgetPeriod::class, BudgetRule::class], version = 8, exportSchema = false)
 abstract class FinanceDb : RoomDatabase() {
     abstract fun dao(): FinanceDao
     companion object {
@@ -148,9 +153,14 @@ abstract class FinanceDb : RoomDatabase() {
                 db.execSQL("CREATE INDEX index_budget_rules_budgetId ON budget_rules(budgetId)")
             }
         }
+        private val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE transactions ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
+            }
+        }
         fun get(context: Context): FinanceDb = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext, FinanceDb::class.java, "carteira.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
                 .build().also { instance = it }
         }
     }
