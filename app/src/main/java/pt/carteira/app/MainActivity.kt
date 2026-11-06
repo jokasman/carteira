@@ -847,6 +847,8 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
     val movementId=initial?.id?:0L
     var title by remember(movementId){mutableStateOf(initial?.title.orEmpty())}
     var amount by remember(movementId){mutableStateOf(initial?.amount?.let{kotlin.math.abs(it)}?.toString().orEmpty())}
+    var movementDate by remember(movementId){mutableLongStateOf(initial?.date?:System.currentTimeMillis())}
+    var showMovementDatePicker by remember(movementId){mutableStateOf(false)}
     var kind by remember(movementId){mutableStateOf(initial?.kind?:"Despesa")}
     var adjustmentDecreases by remember(movementId){mutableStateOf(initial?.let{it.kind=="Ajuste"&&it.amount<0}?:false)}
     var active by remember(movementId){mutableStateOf(initial?.active?:true)}
@@ -906,6 +908,10 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
 
             OutlinedTextField(title,{title=it},label={Text("Descrição (opcional)")},singleLine=true)
             OutlinedTextField(amount,{amount=it},label={Text("Montante (€)")},singleLine=true,keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Decimal))
+            OutlinedButton(onClick={showMovementDatePicker=true},modifier=Modifier.fillMaxWidth()){
+                Icon(Icons.Default.CalendarMonth,null,tint=Green);Spacer(Modifier.width(8.dp))
+                Text("Data do movimento: ${SimpleDateFormat("dd/MM/yyyy",Locale("pt","PT")).format(Date(movementDate))}",color=Green)
+            }
 
             if(kind=="Despesa"){
                 if(pinnedBudget!=null) OutlinedTextField(pinnedBudget.name,{},readOnly=true,label={Text("Orçamento")},supportingText={Text("Movimento associado a este orçamento.")},modifier=Modifier.fillMaxWidth())
@@ -945,7 +951,7 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
                     val signedAmount=if(kind=="Ajuste"&&adjustmentDecreases)-parsedAmount else parsedAmount
                     val movementCategory=initial?.takeIf{it.kind==kind}?.category?.takeIf{it.isNotBlank()}?:defaultMovementCategory(kind)
                     val value=(initial?:FinanceTransaction(title="",amount=signedAmount,kind=kind,category=movementCategory,accountId=accountId)).copy(
-                        title=title,amount=signedAmount,kind=kind,category=movementCategory,accountId=accountId,active=active,
+                        title=title,amount=signedAmount,kind=kind,category=movementCategory,accountId=accountId,date=movementDate,active=active,
                         recurring=recurring,note=note,toAccountId=if(kind=="Transferência")destinationId else null,
                         budgetId=if(kind=="Despesa")selectedBudget?.id else null
                     )
@@ -956,6 +962,19 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
         }){Text(if(saving)"A guardar…" else "Guardar",color=Green,fontWeight=FontWeight.Bold)}},
         dismissButton={TextButton(onClick=close,enabled=!saving){Text("Cancelar",color=Muted)}}
     )
+    if(showMovementDatePicker) MovementDatePickerDialog(movementDate,{movementDate=it;showMovementDatePicker=false},{showMovementDatePicker=false})
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable private fun MovementDatePickerDialog(initialDate:Long,select:(Long)->Unit,close:()->Unit){
+    val state=rememberDatePickerState(initialSelectedDateMillis=localDateToPickerMillis(initialDate))
+    DatePickerDialog(
+        onDismissRequest=close,
+        confirmButton={TextButton(onClick={state.selectedDateMillis?.let{select(pickerDateToLocalStart(it))}},enabled=state.selectedDateMillis!=null){Text("Selecionar",color=Green,fontWeight=FontWeight.Bold)}},
+        dismissButton={TextButton(onClick=close){Text("Cancelar",color=Muted)}}
+    ){
+        DatePicker(state=state,title={Text("Data do movimento",color=Ink,fontWeight=FontWeight.Bold)},showModeToggle=false,modifier=Modifier.fillMaxWidth().height(500.dp).padding(8.dp))
+    }
 }
 
 private fun defaultMovementCategory(kind:String):String=when(kind){
