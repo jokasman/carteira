@@ -77,6 +77,7 @@ data class BudgetPeriod(val budgetId: Long, val monthStart: Long, val limitAmoun
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun saveBudgetPeriod(value: BudgetPeriod)
     @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun addCategories(values: List<Category>)
     @Delete suspend fun deleteTransaction(value: FinanceTransaction)
+    @Delete suspend fun deleteTransactions(values: List<FinanceTransaction>)
     @Delete suspend fun deleteBudget(value: Budget)
     @Query("SELECT COUNT(*) FROM accounts") suspend fun accountCount(): Int
 }
