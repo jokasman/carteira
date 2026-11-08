@@ -455,7 +455,7 @@
       meta.textContent = `${date.toLocaleDateString('pt-PT')} · receita ${money(income.amount)}`;
       card.append(title, meta);
       const split = incomeSplits.get(income.transactionId);
-      if (income.active && income.previousExpenseIds.length === 0) {
+      if (income.active && income.previousExpenseIds.length === 0 && Math.round(income.amount * 100) >= 2) {
         const toggle = document.createElement('button');
         toggle.type = 'button';
         toggle.className = 'secondary-button';
