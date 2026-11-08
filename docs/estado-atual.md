@@ -32,10 +32,10 @@ Atualizado em 8 de novembro de 2026.
 ## Android e entrega de APK
 
 - `applicationId`: `pt.jokasman.carteira`. Não o alteres para futuras atualizações.
-- APK desta versão: `Carteira-APK-42480740611.apk`, criado pelo run GitHub Actions `42480740611` a partir do commit `d2a2d95`; pacote `pt.jokasman.carteira`, versão `1.2.0` (versionCode `3`).
-- O certificado SHA-256 da assinatura coincide com o APK anterior; o `applicationId` e a assinatura estável foram mantidos.
+- APK atual: `Carteira-APK-v1.2.1-42498073803.apk`, criado pelo run GitHub Actions `42498073803` a partir do commit `7fc7adf`; pacote `pt.jokasman.carteira`, versão `1.2.1` (versionCode `4`).
+- O certificado SHA-256 da assinatura coincide com o APK anterior; `applicationId` e assinatura estável foram mantidos.
 - O APK foi guardado em **Ambiente de Trabalho/Carteira APKs**. Regra do utilizador: guardar aí todos os próximos APKs.
-- O build Android desta versão terminou com sucesso no run `42480740611`; o deploy GitHub Pages terminou com sucesso no run `42480740453`.
+- O build Android terminou com sucesso no run `42498073803`; o GitHub Pages serve a classificação em `https://jokasman.github.io/carteira/classificacao/`.
 - Para futuros APKs: fazer push autorizado para `main`, esperar pelo workflow **Build Android APK**, descarregar o artefacto `Carteira-APK`, confirmar package/signature e copiar o `.apk` para **Carteira APKs** no Ambiente de Trabalho. Não adicionar APKs ao Git.
 
 ## Decisões e verificação
