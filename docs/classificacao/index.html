@@ -36,14 +36,15 @@
     .settlement-row{display:flex;gap:12px;align-items:flex-start;padding:11px 0;border-top:1px solid #edf0ed}
     .settlement-row input{width:22px;height:22px;flex:none;margin:1px 0 0;accent-color:#3d8a68}
     .settlement-row label{font-weight:500;margin:0;flex:1;line-height:1.35}
-    .income-part{border-top:1px solid #edf0ed;padding-top:12px;margin-top:12px}
-    .income-part-title{font-size:.93rem;margin:0 0 8px}
-    .income-part input[type=text],.income-part input[type=number]{display:block;width:100%;min-height:46px;padding:9px 11px;border:1px solid #bfcfc3;border-radius:10px;background:#fff;color:#18352d;font:inherit;margin:7px 0}
+    .expense-part{border-top:1px solid #edf0ed;padding-top:12px;margin-top:12px}
+    .expense-part-title{font-size:.93rem;margin:0 0 8px}
+    .expense-part input[type=text],.expense-part input[type=number]{display:block;width:100%;min-height:46px;padding:9px 11px;border:1px solid #bfcfc3;border-radius:10px;background:#fff;color:#18352d;font:inherit;margin:7px 0}
+    .expense-part select{margin-top:6px}
     .secondary-button{width:auto;min-height:42px;padding:9px 13px;background:#e9f3ec;color:#246146}
     .small{font-size:.82rem;color:#78827d}
     .hidden{display:none!important}
     footer{font-size:.82rem;color:#78827d;text-align:center;margin-top:22px}
-    @media(min-width:560px){body{padding-top:38px}.card{padding:22px}.movement{display:grid;grid-template-columns:1fr 270px;gap:8px 22px;align-items:center}.movement .movement-meta{margin-bottom:0}.movement label{grid-column:2;grid-row:1}.movement select{grid-column:2;grid-row:2}.movement .info{grid-column:1;grid-row:1 / span 2}.movement .no-budget{grid-column:2;grid-row:1 / span 2}}
+    @media(min-width:560px){body{padding-top:38px}.card{padding:22px}.movement{display:grid;grid-template-columns:1fr 270px;gap:8px 22px;align-items:center}.movement .movement-meta{margin-bottom:0}.movement label{grid-column:2;grid-row:1}.movement select{grid-column:2;grid-row:2}.movement .info{grid-column:1;grid-row:1 / span 2}.movement .no-budget{grid-column:2;grid-row:1 / span 2}.movement.expense-splitting{display:block}}
   </style>
 </head>
 <body>
@@ -77,13 +78,13 @@
   <section id="workspace" class="hidden" aria-live="polite">
     <div class="card">
       <div id="request-summary" class="count"></div>
-      <p class="hint">Para cada despesa, só aparecem os orçamentos disponíveis indicados no pedido. Também podes dividir uma receita em duas partes: cada parte tem de liquidar despesas pelo valor exato e a soma das partes tem de igualar a receita original.</p>
+      <p class="hint">Para cada despesa, só aparecem os orçamentos disponíveis indicados no pedido. Podes dividir uma despesa em duas partes e atribuir um orçamento opcional a cada uma; a soma mantém-se igual ao movimento original.</p>
     </div>
     <h2>Despesas</h2>
     <div id="expense-list"></div>
     <div id="settlement-section" class="hidden">
       <h2>Liquidações</h2>
-      <p class="hint">Seleciona despesas até o total ficar exatamente igual ao valor da receita. Uma despesa só pode pertencer a uma liquidação. Despesas com orçamento atribuído deixam de aparecer nesta lista.</p>
+      <p class="hint">Seleciona despesas até o total ficar exatamente igual ao valor da receita. Uma despesa só pode pertencer a uma liquidação. Despesas com orçamento atribuído deixam de aparecer nesta lista. Se dividires uma despesa e atribuíres orçamento a uma parte, a linha original sai das liquidações.</p>
       <div id="settlement-list"></div>
     </div>
     <div class="card">
@@ -151,7 +152,7 @@
   let taskToken = null;
   let budgetSelections = new Map();
   let settlementSelections = new Map();
-  let incomeSplits = new Map();
+  let expenseSplits = new Map();
 
   function validId(value) {
     return Number.isSafeInteger(value) && value > 0;
@@ -199,7 +200,7 @@
   function validateResponse(value, requestValue) {
     if (!value || value.schema !== RESPONSE_SCHEMA || value.version !== VERSION) throw new Error('Esta ligação não contém uma resposta Carteira compatível.');
     if (typeof value.requestId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.requestId)) throw new Error('O identificador da resposta é inválido.');
-    if (!Array.isArray(value.assignments) || !Array.isArray(value.settlements) || !Array.isArray(value.incomeSplits || []) || value.assignments.length + value.settlements.length + (value.incomeSplits || []).length < 1 || value.assignments.length + value.settlements.length + (value.incomeSplits || []).length > 500) throw new Error('A resposta não contém decisões válidas.');
+    if (!Array.isArray(value.assignments) || !Array.isArray(value.settlements) || !Array.isArray(value.expenseSplits || []) || value.assignments.length + value.settlements.length + (value.expenseSplits || []).length < 1 || value.assignments.length + value.settlements.length + (value.expenseSplits || []).length > 500) throw new Error('A resposta não contém decisões válidas.');
     const movementIds = new Set();
     for (const assignment of value.assignments) {
       if (!validId(assignment.transactionId) || !validId(assignment.budgetId) || movementIds.has(assignment.transactionId)) throw new Error('A resposta contém uma classificação inválida ou repetida.');
@@ -216,35 +217,28 @@
         settlementExpenseIds.add(expenseId);
       }
     }
-    const incomesById = new Map(requestValue.incomes.map(income => [income.transactionId, income]));
-    const settlementsByIncome = new Map(value.settlements.map(settlement => [settlement.incomeId, settlement]));
-    const splitIncomeIds = new Set();
-    const allSplitExpenseIds = new Set();
-    for (const split of value.incomeSplits || []) {
-      const income = split && incomesById.get(split.incomeId);
-      if (!income || splitIncomeIds.has(split.incomeId) || !income.active || income.previousExpenseIds.length || !Array.isArray(split.parts) || split.parts.length !== 2) throw new Error('A resposta contém uma divisão de receita inválida.');
-      splitIncomeIds.add(split.incomeId);
-      let splitTotal = 0;
-      const splitExpenseIds = new Set();
+    const expensesById = new Map(requestValue.expenses.map(item => [item.transactionId, item]));
+    const assignmentsById = new Map(value.assignments.map(item => [item.transactionId, item]));
+    const splitIds = new Set();
+    for (const split of value.expenseSplits || []) {
+      const item = split && expensesById.get(split.transactionId);
+      if (!item || splitIds.has(split.transactionId) || item.settlementIncomeId !== null || !item.active || !Array.isArray(split.parts) || split.parts.length !== 2) throw new Error('A resposta contém uma divisão de despesa inválida.');
+      splitIds.add(split.transactionId);
+      let total = 0;
+      let firstBudgetId = null;
       for (const part of split.parts) {
-        if (!part || typeof part.title !== 'string' || !part.title.trim() || part.title.trim().length > 120 || !Number.isFinite(part.amount) || part.amount < 0.01 || !Array.isArray(part.expenseIds) || part.expenseIds.length < 1) throw new Error('Uma parte da receita está inválida.');
-        const partCents = Math.round(part.amount * 100);
-        if (Math.abs(part.amount * 100 - partCents) > 0.000001) throw new Error('O valor de uma parte da receita tem de usar cêntimos.');
-        splitTotal += partCents;
-        let partExpenseTotal = 0;
-        for (const expenseId of part.expenseIds) {
-          if (!validId(expenseId) || splitExpenseIds.has(expenseId) || allSplitExpenseIds.has(expenseId)) throw new Error('Uma despesa foi repetida na divisão da receita.');
-          const expense = requestValue.expenses.find(item => item.transactionId === expenseId);
-          if (!expense || expense.settlementIncomeId !== null || !settlementExpenseIds.has(expenseId)) throw new Error('A divisão usa uma despesa que não consta na liquidação.');
-          splitExpenseIds.add(expenseId);
-          allSplitExpenseIds.add(expenseId);
-          partExpenseTotal += Math.round(expense.amount * 100);
-        }
-        if (partExpenseTotal !== partCents) throw new Error('As despesas de cada parte têm de igualar exatamente o valor dessa parte.');
+        if (!part || typeof part.title !== 'string' || !part.title.trim() || part.title.trim().length > 120 || !Number.isFinite(part.amount) || part.amount < 0.01 || (part.budgetId !== null && !validId(part.budgetId))) throw new Error('Uma parte da despesa está inválida.');
+        const cents = Math.round(part.amount * 100);
+        if (Math.abs(part.amount * 100 - cents) > 0.000001) throw new Error('O valor de uma parte da despesa tem de usar cêntimos.');
+        if (part.budgetId !== null && !item.budgets.some(budget => budget.id === part.budgetId)) throw new Error('A resposta escolhe um orçamento que não consta no pedido.');
+        if (firstBudgetId === null && part.budgetId !== null) firstBudgetId = part.budgetId;
+        total += cents;
       }
-      if (splitTotal !== Math.round(income.amount * 100)) throw new Error('A soma das partes tem de ser igual ao valor original da receita.');
-      const settlement = settlementsByIncome.get(split.incomeId);
-      if (!settlement || settlement.expenseIds.length !== splitExpenseIds.size || settlement.expenseIds.some(id => !splitExpenseIds.has(id))) throw new Error('A liquidação não corresponde às partes da receita.');
+      if (total !== Math.round(item.amount * 100)) throw new Error('A soma das partes tem de ser igual ao valor original da despesa.');
+      const assignment = assignmentsById.get(item.transactionId);
+      if (firstBudgetId !== null) {
+        if (!assignment || assignment.budgetId !== firstBudgetId || settlementExpenseIds.has(item.transactionId)) throw new Error('A classificação da despesa dividida é inconsistente.');
+      } else if (assignment) throw new Error('Uma despesa dividida sem orçamento não deve conter classificação.');
     }
   }
 
@@ -315,13 +309,42 @@
     return request.expenses.find(item => item.transactionId === id);
   }
 
-  function incomePartKey(incomeId, partIndex) {
-    return `${incomeId}:${partIndex}`;
+  function amountCents(value) {
+    const normalized = String(value).trim().replace(',', '.');
+    if (!/^\d+(?:\.\d{1,2})?$/.test(normalized)) return null;
+    const amount = Number(normalized);
+    if (!Number.isFinite(amount) || amount < 0.01) return null;
+    return Math.round(amount * 100);
   }
 
-  function selectedByOtherIncome(expenseId, currentPartKey) {
-    for (const [key, selected] of settlementSelections) {
-      if (key !== currentPartKey && selected.has(expenseId)) return true;
+  function splitBudgeted(expenseId) {
+    const split = expenseSplits.get(expenseId);
+    return Boolean(split && split.parts.some(part => part.budgetId !== null));
+  }
+
+  function removeFromSettlements(expenseId) {
+    settlementSelections.forEach(selected => selected.delete(expenseId));
+  }
+
+  function updateExpenseSplitTotal(item) {
+    const targetLine = document.getElementById(`expense-split-total-${item.transactionId}`);
+    const split = expenseSplits.get(item.transactionId);
+    if (!targetLine || !split) return;
+    const amounts = split.parts.map(part => amountCents(part.amountText));
+    if (amounts.some(amount => amount === null)) {
+      targetLine.className = 'not-exact';
+      targetLine.textContent = 'Indica dois valores válidos em euros.';
+      return;
+    }
+    const total = amounts.reduce((sum, amount) => sum + amount, 0);
+    const target = Math.round(item.amount * 100);
+    targetLine.className = total === target ? 'exact' : 'not-exact';
+    targetLine.textContent = `Soma das partes: ${money(total / 100)} / ${money(item.amount)}${total === target ? ' · valor exato' : ''}`;
+  }
+
+  function selectedByOtherIncome(expenseId, incomeId) {
+    for (const [otherId, selected] of settlementSelections) {
+      if (otherId !== incomeId && selected.has(expenseId)) return true;
     }
     return false;
   }
@@ -331,56 +354,12 @@
     return false;
   }
 
-  function amountCents(value) {
-    const normalized = String(value).trim().replace(',', '.');
-    if (!/^\d+(?:\.\d{1,2})?$/.test(normalized)) return null;
-    const amount = Number(normalized);
-    if (!Number.isFinite(amount) || amount < 0.01) return null;
-    return Math.round(amount * 100);
-  }
-
-  function incomeParts(income) {
-    const split = incomeSplits.get(income.transactionId);
-    if (split) return split.parts;
-    return [{ title: income.displayTitle, amountText: (Math.round(income.amount * 100) / 100).toFixed(2).replace('.', ',') }];
-  }
-
-  function settlementTotal(incomeId, partIndex) {
-    const selected = settlementSelections.get(incomePartKey(incomeId, partIndex)) || new Set();
+  function settlementTotal(incomeId) {
+    const selected = settlementSelections.get(incomeId) || new Set();
     return [...selected].reduce((sum, id) => {
       const item = expenseItem(id);
       return sum + (item ? Math.round(item.amount * 100) : 0);
     }, 0);
-  }
-
-  function updatePartTotal(incomeId, partIndex) {
-    const targetLine = document.getElementById(`settlement-total-${incomeId}-${partIndex}`);
-    if (!targetLine) return;
-    const income = request.incomes.find(item => item.transactionId === incomeId);
-    const part = income && incomeParts(income)[partIndex];
-    const target = part ? amountCents(part.amountText) : null;
-    const total = settlementTotal(incomeId, partIndex);
-    targetLine.className = target !== null && total === target ? 'exact' : 'not-exact';
-    targetLine.textContent = target === null
-      ? 'Indica um valor válido em euros.'
-      : `Selecionado: ${money(total / 100)} / ${money(target / 100)}${total === target ? ' · valor exato' : ''}`;
-  }
-
-  function updateSplitTotal(incomeId) {
-    const targetLine = document.getElementById(`split-total-${incomeId}`);
-    const income = request.incomes.find(item => item.transactionId === incomeId);
-    const split = income && incomeSplits.get(incomeId);
-    if (!targetLine || !income || !split) return;
-    const amounts = split.parts.map(part => amountCents(part.amountText));
-    if (amounts.some(amount => amount === null)) {
-      targetLine.className = 'not-exact';
-      targetLine.textContent = 'Indica os dois valores em euros.';
-      return;
-    }
-    const total = amounts.reduce((sum, amount) => sum + amount, 0);
-    const target = Math.round(income.amount * 100);
-    targetLine.className = total === target ? 'exact' : 'not-exact';
-    targetLine.textContent = `Soma das partes: ${money(total / 100)} / ${money(target / 100)}${total === target ? ' · valor exato' : ''}`;
   }
 
   function renderExpenses() {
@@ -401,7 +380,75 @@
       info.append(title, meta);
       card.append(info);
 
-      if (item.budgets.length > 0) {
+      const split = expenseSplits.get(item.transactionId);
+      if (split) {
+        card.classList.add('expense-splitting');
+        split.parts.forEach((part, partIndex) => {
+          const partCard = document.createElement('div');
+          partCard.className = 'expense-part';
+          const partHeading = document.createElement('h4');
+          partHeading.className = 'expense-part-title';
+          partHeading.textContent = `Parte ${partIndex + 1}`;
+          const titleInput = document.createElement('input');
+          titleInput.type = 'text';
+          titleInput.maxLength = 120;
+          titleInput.value = part.title;
+          titleInput.placeholder = `Descrição da parte ${partIndex + 1}`;
+          titleInput.setAttribute('aria-label', `Descrição da parte ${partIndex + 1}`);
+          titleInput.addEventListener('input', () => {
+            expenseSplits.get(item.transactionId).parts[partIndex].title = titleInput.value;
+            updateCompletion();
+          });
+          const amountInput = document.createElement('input');
+          amountInput.type = 'text';
+          amountInput.inputMode = 'decimal';
+          amountInput.value = part.amountText;
+          amountInput.placeholder = 'Montante da parte (€)';
+          amountInput.setAttribute('aria-label', `Montante da parte ${partIndex + 1} em euros`);
+          amountInput.addEventListener('input', () => {
+            expenseSplits.get(item.transactionId).parts[partIndex].amountText = amountInput.value;
+            updateExpenseSplitTotal(item);
+            updateCompletion();
+          });
+          partCard.append(partHeading, titleInput, amountInput);
+          if (item.budgets.length > 0) {
+            const budgetLabel = document.createElement('label');
+            budgetLabel.htmlFor = `split-budget-${item.transactionId}-${partIndex}`;
+            budgetLabel.textContent = `Orçamento da parte ${partIndex + 1} (opcional)`;
+            const select = document.createElement('select');
+            select.id = budgetLabel.htmlFor;
+            const none = document.createElement('option');
+            none.value = '';
+            none.textContent = 'Sem orçamento';
+            select.append(none);
+            item.budgets.forEach(budget => {
+              const option = document.createElement('option');
+              option.value = String(budget.id);
+              option.textContent = budget.name;
+              select.append(option);
+            });
+            select.value = part.budgetId === null ? '' : String(part.budgetId);
+            select.addEventListener('change', () => {
+              const current = expenseSplits.get(item.transactionId);
+              current.parts[partIndex].budgetId = select.value ? Number(select.value) : null;
+              if (current.parts.some(value => value.budgetId !== null)) removeFromSettlements(item.transactionId);
+              renderExpenses();
+              renderSettlementList();
+              updateCompletion();
+            });
+            partCard.append(budgetLabel, select);
+          } else {
+            const noBudget = document.createElement('p');
+            noBudget.className = 'hint';
+            noBudget.textContent = 'Sem orçamento disponível para esta parte.';
+            partCard.append(noBudget);
+          }
+          card.append(partCard);
+        });
+        const totalLine = document.createElement('p');
+        totalLine.id = `expense-split-total-${item.transactionId}`;
+        card.append(totalLine);
+      } else if (item.budgets.length > 0) {
         const label = document.createElement('label');
         label.htmlFor = `budget-${index}`;
         label.textContent = 'Orçamento disponível';
@@ -418,6 +465,7 @@
           option.textContent = budget.name;
           select.append(option);
         });
+        select.value = budgetSelections.has(item.transactionId) ? String(budgetSelections.get(item.transactionId)) : '';
         select.addEventListener('change', () => {
           if (select.value) budgetSelections.set(item.transactionId, Number(select.value));
           else budgetSelections.delete(item.transactionId);
@@ -432,7 +480,39 @@
         note.textContent = linkedIncome ? `Já liquidada com ${linkedIncome.displayTitle}.` : 'Sem orçamento disponível; pode ser usada numa liquidação.';
         card.append(note);
       }
+      if (item.active && item.settlementIncomeId === null && Math.round(item.amount * 100) >= 2) {
+        const toggle = document.createElement('button');
+        toggle.type = 'button';
+        toggle.className = 'secondary-button';
+        toggle.textContent = split ? 'Remover divisão' : 'Dividir esta despesa';
+        toggle.addEventListener('click', () => {
+          if (expenseSplits.has(item.transactionId)) {
+            const current = expenseSplits.get(item.transactionId);
+            const firstBudget = current.parts[0].budgetId;
+            const sameBudget = current.parts[1].budgetId === firstBudget;
+            expenseSplits.delete(item.transactionId);
+            if (sameBudget && firstBudget !== null) budgetSelections.set(item.transactionId, firstBudget);
+            else budgetSelections.delete(item.transactionId);
+          } else {
+            const cents = Math.round(item.amount * 100);
+            const first = Math.floor(cents / 2);
+            const second = cents - first;
+            const originalBudget = budgetSelections.get(item.transactionId) || null;
+            budgetSelections.delete(item.transactionId);
+            expenseSplits.set(item.transactionId, { parts: [
+              { title: item.displayTitle, amountText: (first / 100).toFixed(2).replace('.', ','), budgetId: originalBudget },
+              { title: `${item.displayTitle} (parte 2)`, amountText: (second / 100).toFixed(2).replace('.', ','), budgetId: originalBudget }
+            ] });
+            if (originalBudget !== null) removeFromSettlements(item.transactionId);
+          }
+          renderExpenses();
+          renderSettlementList();
+          updateCompletion();
+        });
+        card.append(toggle);
+      }
       expenseList.append(card);
+      if (split) updateExpenseSplitTotal(item);
     });
   }
 
@@ -454,168 +534,82 @@
       meta.className = 'movement-meta';
       meta.textContent = `${date.toLocaleDateString('pt-PT')} · receita ${money(income.amount)}`;
       card.append(title, meta);
-      const split = incomeSplits.get(income.transactionId);
-      if (income.active && income.previousExpenseIds.length === 0 && Math.round(income.amount * 100) >= 2) {
-        const toggle = document.createElement('button');
-        toggle.type = 'button';
-        toggle.className = 'secondary-button';
-        toggle.textContent = split ? 'Remover divisão' : 'Dividir esta receita';
-        toggle.addEventListener('click', () => {
-          if (incomeSplits.has(income.transactionId)) {
-            const firstKey = incomePartKey(income.transactionId, 0);
-            const secondKey = incomePartKey(income.transactionId, 1);
-            const merged = new Set([...(settlementSelections.get(firstKey) || []), ...(settlementSelections.get(secondKey) || [])]);
-            settlementSelections.set(firstKey, merged);
-            settlementSelections.delete(secondKey);
-            incomeSplits.delete(income.transactionId);
-          } else {
-            const cents = Math.round(income.amount * 100);
-            const first = Math.floor(cents / 2);
-            const second = cents - first;
-            incomeSplits.set(income.transactionId, { parts: [
-              { title: income.displayTitle, amountText: (first / 100).toFixed(2).replace('.', ',') },
-              { title: `${income.displayTitle} (parte 2)`, amountText: (second / 100).toFixed(2).replace('.', ',') }
-            ] });
-            settlementSelections.set(incomePartKey(income.transactionId, 0), settlementSelections.get(incomePartKey(income.transactionId, 0)) || new Set());
-            settlementSelections.set(incomePartKey(income.transactionId, 1), new Set());
-          }
+      const selected = settlementSelections.get(income.transactionId) || new Set();
+      request.expenses.forEach(item => {
+        if (budgetSelections.has(item.transactionId) || splitBudgeted(item.transactionId)) return;
+        const row = document.createElement('div');
+        row.className = 'settlement-row';
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.id = `settle-${income.transactionId}-${item.transactionId}`;
+        checkbox.checked = selected.has(item.transactionId);
+        const selectedElsewhere = selectedByOtherIncome(item.transactionId, income.transactionId);
+        const linkedElsewhere = item.settlementIncomeId !== null && item.settlementIncomeId !== income.transactionId;
+        checkbox.disabled = selectedElsewhere || linkedElsewhere;
+        const label = document.createElement('label');
+        label.htmlFor = checkbox.id;
+        const dateLabel = new Date(item.date).toLocaleDateString('pt-PT');
+        label.textContent = `${item.displayTitle} · ${dateLabel} · ${money(item.amount)}${item.settlementIncomeId === income.transactionId ? ' · atualmente liquidada aqui' : ''}`;
+        checkbox.addEventListener('change', () => {
+          const next = new Set(settlementSelections.get(income.transactionId) || []);
+          if (checkbox.checked) next.add(item.transactionId);
+          else next.delete(item.transactionId);
+          settlementSelections.set(income.transactionId, next);
+          renderExpenses();
           renderSettlementList();
           updateCompletion();
         });
-        card.append(toggle);
-      }
-      incomeParts(income).forEach((part, partIndex) => {
-        const partCard = document.createElement('div');
-        partCard.className = 'income-part';
-        if (split) {
-          const partHeading = document.createElement('h4');
-          partHeading.className = 'income-part-title';
-          partHeading.textContent = `Parte ${partIndex + 1}`;
-          const titleInput = document.createElement('input');
-          titleInput.type = 'text';
-          titleInput.maxLength = 120;
-          titleInput.value = part.title;
-          titleInput.setAttribute('aria-label', `Descrição da parte ${partIndex + 1}`);
-          titleInput.placeholder = `Descrição da parte ${partIndex + 1}`;
-          titleInput.addEventListener('input', () => {
-            const current = incomeSplits.get(income.transactionId);
-            current.parts[partIndex].title = titleInput.value;
-            updateCompletion();
-          });
-          const amountInput = document.createElement('input');
-          amountInput.type = 'text';
-          amountInput.inputMode = 'decimal';
-          amountInput.value = part.amountText;
-          amountInput.setAttribute('aria-label', `Montante da parte ${partIndex + 1} em euros`);
-          amountInput.placeholder = 'Montante da parte (€)';
-          amountInput.addEventListener('input', () => {
-            const current = incomeSplits.get(income.transactionId);
-            current.parts[partIndex].amountText = amountInput.value;
-            updatePartTotal(income.transactionId, partIndex);
-            updateSplitTotal(income.transactionId);
-            updateCompletion();
-          });
-          partCard.append(partHeading, titleInput, amountInput);
-        }
-        const partKey = incomePartKey(income.transactionId, partIndex);
-        const selected = settlementSelections.get(partKey) || new Set();
-        request.expenses.forEach(item => {
-          if (budgetSelections.has(item.transactionId)) return;
-          const row = document.createElement('div');
-          row.className = 'settlement-row';
-          const checkbox = document.createElement('input');
-          checkbox.type = 'checkbox';
-          checkbox.id = `settle-${income.transactionId}-${partIndex}-${item.transactionId}`;
-          checkbox.checked = selected.has(item.transactionId);
-          const selectedElsewhere = selectedByOtherIncome(item.transactionId, partKey);
-          const linkedElsewhere = item.settlementIncomeId !== null && item.settlementIncomeId !== income.transactionId;
-          checkbox.disabled = selectedElsewhere || linkedElsewhere;
-          const label = document.createElement('label');
-          label.htmlFor = checkbox.id;
-          const dateLabel = new Date(item.date).toLocaleDateString('pt-PT');
-          label.textContent = `${item.displayTitle} · ${dateLabel} · ${money(item.amount)}${item.settlementIncomeId === income.transactionId ? ' · atualmente liquidada aqui' : ''}`;
-          checkbox.addEventListener('change', () => {
-            const next = new Set(settlementSelections.get(partKey) || []);
-            if (checkbox.checked) next.add(item.transactionId);
-            else next.delete(item.transactionId);
-            settlementSelections.set(partKey, next);
-            renderExpenses();
-            renderSettlementList();
-            updateCompletion();
-          });
-          row.append(checkbox, label);
-          partCard.append(row);
-        });
-        const amountLine = document.createElement('p');
-        amountLine.id = `settlement-total-${income.transactionId}-${partIndex}`;
-        const initialTarget = split ? amountCents(part.amountText) : Math.round(income.amount * 100);
-        const initialTotal = settlementTotal(income.transactionId, partIndex);
-        amountLine.className = initialTarget !== null && initialTotal === initialTarget ? 'exact' : 'not-exact';
-        amountLine.textContent = initialTarget === null
-          ? 'Indica um valor válido em euros.'
-          : `Selecionado: ${money(initialTotal / 100)} / ${money(initialTarget / 100)}${initialTotal === initialTarget ? ' · valor exato' : ''}`;
-        partCard.append(amountLine);
-        card.append(partCard);
+        row.append(checkbox, label);
+        card.append(row);
       });
-      if (split) {
-        const splitTotal = document.createElement('p');
-        splitTotal.id = `split-total-${income.transactionId}`;
-        card.append(splitTotal);
-      }
+      const total = settlementTotal(income.transactionId);
+      const target = Math.round(income.amount * 100);
+      const amountLine = document.createElement('p');
+      amountLine.className = total === target ? 'exact' : 'not-exact';
+      amountLine.textContent = `Selecionado: ${money(total / 100)} / ${money(income.amount)}${total === target ? ' · valor exato' : ''}`;
+      card.append(amountLine);
       settlementList.append(card);
-      if (split) updateSplitTotal(income.transactionId);
     });
   }
 
   function currentResponse() {
     const assignments = [...budgetSelections.entries()].map(([transactionId, budgetId]) => ({ transactionId, budgetId }));
-    const settlements = [];
-    const incomeSplits = [];
-    request.incomes.forEach(income => {
-      const split = incomeSplitsState(income);
-      if (split) {
-        incomeSplits.push({
-          incomeId: income.transactionId,
-          parts: split.parts.map((part, partIndex) => ({
-            title: part.title.trim(),
-            amount: (amountCents(part.amountText) || 0) / 100,
-            expenseIds: [...(settlementSelections.get(incomePartKey(income.transactionId, partIndex)) || new Set())]
-          }))
-        });
-      }
-      const expenseIds = [...new Set(incomeParts(income).flatMap((_, partIndex) => [...(settlementSelections.get(incomePartKey(income.transactionId, partIndex)) || new Set())]))];
-      if (expenseIds.length) settlements.push({ incomeId: income.transactionId, expenseIds });
+    expenseSplits.forEach((split, transactionId) => {
+      const firstBudgetedPart = split.parts.find(part => part.budgetId !== null);
+      if (firstBudgetedPart) assignments.push({ transactionId, budgetId: firstBudgetedPart.budgetId });
     });
-    return { schema: RESPONSE_SCHEMA, version: VERSION, requestId: request.requestId, assignments, settlements, incomeSplits };
-  }
-
-  function incomeSplitsState(income) {
-    return incomeSplits.get(income.transactionId) || null;
+    const settlements = request.incomes.map(income => ({
+      incomeId: income.transactionId,
+      expenseIds: [...(settlementSelections.get(income.transactionId) || new Set())]
+    })).filter(settlement => settlement.expenseIds.length > 0);
+    const expenseSplitsJson = [...expenseSplits.entries()].map(([transactionId, split]) => ({
+      transactionId,
+      parts: split.parts.map(part => ({ title: part.title.trim(), amount: (amountCents(part.amountText) || 0) / 100, budgetId: part.budgetId }))
+    }));
+    return { schema: RESPONSE_SCHEMA, version: VERSION, requestId: request.requestId, assignments, settlements, expenseSplits: expenseSplitsJson };
   }
 
   function updateCompletion() {
     if (!request) return;
     let invalidSettlement = false;
+    let invalidSplit = false;
+    expenseSplits.forEach((split, expenseId) => {
+      const item = expenseItem(expenseId);
+      const amounts = split.parts.map(part => amountCents(part.amountText));
+      if (!item || split.parts.some(part => !part.title.trim() || part.title.trim().length > 120 || (part.budgetId !== null && !item.budgets.some(budget => budget.id === part.budgetId))) ||
+          amounts.some(amount => amount === null) || amounts.reduce((sum, amount) => sum + (amount || 0), 0) !== Math.round(item.amount * 100)) invalidSplit = true;
+    });
     for (const income of request.incomes) {
-      const split = incomeSplitsState(income);
-      if (split) {
-        const amounts = split.parts.map(part => amountCents(part.amountText));
-        if (amounts.some(amount => amount === null) || amounts.reduce((sum, amount) => sum + amount, 0) !== Math.round(income.amount * 100)) invalidSettlement = true;
-      }
-      incomeParts(income).forEach((part, partIndex) => {
-        const selected = settlementSelections.get(incomePartKey(income.transactionId, partIndex)) || new Set();
-        const target = split ? amountCents(part.amountText) : Math.round(income.amount * 100);
-        if (split) {
-          if (!part.title.trim() || part.title.trim().length > 120 || selected.size === 0 || target === null || settlementTotal(income.transactionId, partIndex) !== target) invalidSettlement = true;
-        } else if (selected.size > 0 && settlementTotal(income.transactionId, partIndex) !== target) invalidSettlement = true;
-      });
+      const selected = settlementSelections.get(income.transactionId) || new Set();
+      if (selected.size > 0 && settlementTotal(income.transactionId) !== Math.round(income.amount * 100)) invalidSettlement = true;
     }
     const response = currentResponse();
-    const hasAction = response.assignments.length > 0 || response.settlements.length > 0 || response.incomeSplits.length > 0;
-    sendButton.disabled = invalidSettlement || !hasAction;
-    if (invalidSettlement) completion.textContent = 'Ajusta os valores para somarem a receita e cada parte para fechar ao cêntimo.';
+    const hasAction = response.assignments.length > 0 || response.settlements.length > 0;
+    sendButton.disabled = invalidSettlement || invalidSplit || !hasAction;
+    if (invalidSplit) completion.textContent = 'A soma das partes tem de igualar exatamente o valor original da despesa.';
+    else if (invalidSettlement) completion.textContent = 'Ajusta cada liquidação até o total ficar exatamente igual à receita.';
     else if (!hasAction) completion.textContent = 'Escolhe pelo menos um orçamento ou uma liquidação válida.';
-    else completion.textContent = `${response.assignments.length} despesas com orçamento · ${response.settlements.length} liquidações válidas · ${response.incomeSplits.length} receitas divididas.`;
+    else completion.textContent = `${response.assignments.length} despesas classificadas · ${response.settlements.length} liquidações válidas · ${response.expenseSplits.length} despesas divididas.`;
   }
 
   function downloadFallback(blob, filename) {
@@ -650,8 +644,8 @@
     responseWorkspace.classList.add('hidden');
     document.getElementById('classifier-done').classList.add('hidden');
     budgetSelections = new Map();
-    settlementSelections = new Map(value.incomes.map(income => [incomePartKey(income.transactionId, 0), new Set(income.previousExpenseIds)]));
-    incomeSplits = new Map();
+    settlementSelections = new Map(value.incomes.map(income => [income.transactionId, new Set(income.previousExpenseIds)]));
+    expenseSplits = new Map();
     summary.textContent = `${value.expenses.length} despesas · ${value.incomes.length} receitas disponíveis para liquidação`;
     renderExpenses();
     renderSettlementList();
@@ -664,7 +658,7 @@
     ownerUpload.classList.add('hidden');
     workspace.classList.add('hidden');
     document.getElementById('classifier-done').classList.add('hidden');
-    responseSummary.textContent = value.assignments.length + ' classificações · ' + value.settlements.length + ' liquidações · ' + (value.incomeSplits || []).length + ' receitas divididas';
+    responseSummary.textContent = value.assignments.length + ' classificações · ' + value.settlements.length + ' liquidações · ' + (value.expenseSplits || []).length + ' despesas divididas';
     responseWorkspace.classList.remove('hidden');
   }
 
@@ -718,7 +712,7 @@
     requestLink.value = '';
     budgetSelections = new Map();
     settlementSelections = new Map();
-    incomeSplits = new Map();
+    expenseSplits = new Map();
     const file = fileInput.files && fileInput.files[0];
     if (!file) return;
     if (file.size > 2 * 1024 * 1024) {

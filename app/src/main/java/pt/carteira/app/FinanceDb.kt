@@ -70,7 +70,7 @@ data class BudgetPeriod(val budgetId: Long, val monthStart: Long, val limitAmoun
     @Query("SELECT EXISTS(SELECT 1 FROM categories WHERE name = :name AND kind = :kind)") suspend fun categoryExists(name: String, kind: String): Boolean
     @Insert suspend fun addAccount(value: Account): Long
     @Update suspend fun updateAccount(value: Account)
-    @Insert suspend fun addTransaction(value: FinanceTransaction): Long
+    @Insert suspend fun addTransaction(value: FinanceTransaction)
     @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun importTransactions(values: List<FinanceTransaction>): List<Long>
     @Update suspend fun updateTransaction(value: FinanceTransaction)
     @Transaction suspend fun saveTransactionAndRule(value: FinanceTransaction, rule: BudgetRule?) {
@@ -79,28 +79,14 @@ data class BudgetPeriod(val budgetId: Long, val monthStart: Long, val limitAmoun
     }
     @Transaction suspend fun applyClassificationChanges(
         budgetUpdates: List<FinanceTransaction>,
-        incomePartChanges: List<ClassificationIncomePartChange>,
-        settlementExpenseChanges: List<ClassificationSettlementExpenseChange>
+        incomeUpdates: List<FinanceTransaction>,
+        settlementExpenseUpdates: List<FinanceTransaction>,
+        expensePartUpdates: List<FinanceTransaction>
     ) {
         budgetUpdates.forEach { updateTransaction(it) }
-        val incomeIds = mutableMapOf<Pair<Long, Int>, Long>()
-        incomePartChanges.forEach { change ->
-            val id = if (change.transaction.id == 0L) addTransaction(change.transaction) else {
-                updateTransaction(change.transaction)
-                change.transaction.id
-            }
-            check(incomeIds.put(change.sourceIncomeId to change.partIndex, id) == null) { "A resposta repete uma parte de receita." }
-        }
-        settlementExpenseChanges.forEach { change ->
-            val transaction = if (change.sourceIncomeId == null) {
-                change.transaction.copy(active = true, settlementRevenueId = null)
-            } else {
-                val partIndex = checkNotNull(change.partIndex) { "Falta a parte da receita numa liquidação." }
-                val incomeId = checkNotNull(incomeIds[change.sourceIncomeId to partIndex]) { "Falta uma receita criada para a liquidação." }
-                change.transaction.copy(active = false, settlementRevenueId = incomeId)
-            }
-            updateTransaction(transaction)
-        }
+        incomeUpdates.forEach { updateTransaction(it) }
+        settlementExpenseUpdates.forEach { updateTransaction(it) }
+        expensePartUpdates.forEach { if (it.id == 0L) addTransaction(it) else updateTransaction(it) }
     }
     @Transaction suspend fun splitTransaction(first: FinanceTransaction, second: FinanceTransaction) {
         updateTransaction(first)

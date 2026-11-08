@@ -27,6 +27,6 @@ Não publiques um `database_id` de exemplo. O endereço da aplicação não é s
 
 - `POST /api/create` recebe e valida o pedido JSON; responde com um token aleatório.
 - `POST /api/load` recebe o token no corpo e devolve o pedido e, se existir, a resposta.
-- `POST /api/submit` recebe o token e a resposta. O Worker verifica se as decisões pertencem ao pedido e se cada liquidação soma exatamente o valor da receita. A resposta pode incluir partes de receita; a Carteira valida os valores das partes e aplica-as localmente. Só é aceite uma resposta por pedido.
+- `POST /api/submit` recebe o token e a resposta. O Worker verifica se as decisões pertencem ao pedido e se cada liquidação soma exatamente o valor da receita. A resposta pode incluir partes de despesa; a página e a Carteira validam a divisão e a app aplica as partes localmente. Só é aceite uma resposta por pedido.
 
 As chamadas não guardam o token na query string. A página coloca-o apenas no fragmento do link, que não é enviado numa navegação HTTP normal.

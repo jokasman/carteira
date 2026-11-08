@@ -17,7 +17,7 @@ Aplicação nativa Android de finanças pessoais, construída com Kotlin, Jetpac
 
 Em **Movimentos**, mantém premido um movimento e seleciona os restantes que queres enviar. Toca no ícone de partilha e guarda o pedido JSON no dispositivo; a app abre a página de classificação. O pedido inclui apenas os movimentos selecionados que sejam elegíveis. Para cada despesa, só seguem os orçamentos disponíveis no mês respetivo. Para rever uma liquidação existente, seleciona a receita e todas as despesas já associadas.
 
-Na página [Classificar e liquidar](https://jokasman.github.io/carteira/classificacao/), o remetente carrega o pedido JSON da Carteira e recebe uma ligação curta. A outra pessoa abre essa ligação, atribui orçamentos e/ou liquida receitas sem carregar nem descarregar ficheiros. Também pode dividir uma receita em duas partes, dar um nome e valor a cada uma e associar despesas a cada parte. As despesas de cada parte têm de somar exatamente o seu valor e as partes têm de somar exatamente a receita original. Quando termina, avisa o remetente. Este volta ao mesmo link, descarrega o JSON de resposta e, na Carteira, toca em **Resposta**, escolhe o ficheiro, revê as decisões e toca em **Aplicar decisões**.
+Na página [Classificar e liquidar](https://jokasman.github.io/carteira/classificacao/), o remetente carrega o pedido JSON da Carteira e recebe uma ligação curta. A outra pessoa abre essa ligação, atribui orçamentos e/ou liquida receitas sem carregar nem descarregar ficheiros. Também pode dividir uma despesa em duas partes, dar um nome e valor a cada uma e atribuir-lhes orçamentos opcionais. A soma das partes tem de igualar exatamente o valor original. Se ambas ficarem sem orçamento, a despesa dividida pode ser liquidada pelo total; se alguma parte tiver orçamento, a linha sai da lista de liquidações. Quando termina, avisa o remetente. Este volta ao mesmo link, descarrega o JSON de resposta e, na Carteira, toca em **Resposta**, escolhe o ficheiro, revê as decisões e toca em **Aplicar decisões**.
 
 ### Privacidade
 
@@ -25,7 +25,7 @@ O pedido contém somente os movimentos selecionados e os campos necessários à 
 
 ### Publicação
 
-O GitHub Pages publica a pasta `docs` da branch `main`. A página encaminha para o Worker Cloudflare, que serve os ficheiros e a API no mesmo domínio. A configuração e as instruções de deploy estão em `cloudflare/classification-api/`.
+O GitHub Pages publica a pasta `docs` da branch `main`. A página usa a API do Worker Cloudflare para o armazenamento temporário; a configuração e as instruções estão em `cloudflare/classification-api/`.
 
 As ligações de classificação antigas, criadas antes do armazenamento temporário, continuam a abrir a página de compatibilidade `docs/classificacao/legacy.html`.
 
