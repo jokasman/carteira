@@ -84,11 +84,11 @@
     <div id="expense-list"></div>
     <div id="settlement-section" class="hidden">
       <h2>Liquidações</h2>
-      <p class="hint">Seleciona despesas até o total ficar exatamente igual ao valor da receita. Uma despesa só pode pertencer a uma liquidação. Despesas com orçamento atribuído deixam de aparecer nesta lista. Se dividires uma despesa e atribuíres orçamento a uma parte, a linha original sai das liquidações.</p>
+      <p class="hint">Seleciona despesas ou parcelas sem orçamento até o total ficar exatamente igual ao valor da receita. Cada parcela só pode pertencer a uma liquidação; as parcelas com orçamento atribuído ficam fora desta lista.</p>
       <div id="settlement-list"></div>
     </div>
     <div class="card">
-      <div id="completion" class="hint">Escolhe pelo menos um orçamento ou uma liquidação válida.</div>
+      <div id="completion" class="hint">Classifica, divide ou liquida pelo menos um movimento.</div>
       <button id="send-response" type="button" disabled>Concluir classificação</button>
       <p id="share-status" class="hint" aria-live="polite">Ao concluir, a resposta fica disponível no mesmo link. Avisa o remetente para a importar.</p>
     </div>
@@ -200,30 +200,15 @@
   function validateResponse(value, requestValue) {
     if (!value || value.schema !== RESPONSE_SCHEMA || value.version !== VERSION) throw new Error('Esta ligação não contém uma resposta Carteira compatível.');
     if (typeof value.requestId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.requestId)) throw new Error('O identificador da resposta é inválido.');
-    if (!Array.isArray(value.assignments) || !Array.isArray(value.settlements) || !Array.isArray(value.expenseSplits || []) || value.assignments.length + value.settlements.length + (value.expenseSplits || []).length < 1 || value.assignments.length + value.settlements.length + (value.expenseSplits || []).length > 500) throw new Error('A resposta não contém decisões válidas.');
-    const movementIds = new Set();
-    for (const assignment of value.assignments) {
-      if (!validId(assignment.transactionId) || !validId(assignment.budgetId) || movementIds.has(assignment.transactionId)) throw new Error('A resposta contém uma classificação inválida ou repetida.');
-      movementIds.add(assignment.transactionId);
-    }
-    const incomeIds = new Set();
-    const settlementExpenseIds = new Set();
-    for (const settlement of value.settlements) {
-      if (!validId(settlement.incomeId) || incomeIds.has(settlement.incomeId) || !Array.isArray(settlement.expenseIds) || settlement.expenseIds.length < 1 || settlement.expenseIds.length > 500) throw new Error('A resposta contém uma liquidação inválida.');
-      incomeIds.add(settlement.incomeId);
-      for (const expenseId of settlement.expenseIds) {
-        if (!validId(expenseId) || movementIds.has(expenseId)) throw new Error('A resposta repete uma despesa ou movimento.');
-        movementIds.add(expenseId);
-        settlementExpenseIds.add(expenseId);
-      }
-    }
+    const splits = value.expenseSplits || [];
+    if (!Array.isArray(value.assignments) || !Array.isArray(value.settlements) || !Array.isArray(splits) || value.assignments.length + value.settlements.length + splits.length < 1 || value.assignments.length + value.settlements.length + splits.length > 500) throw new Error('A resposta não contém decisões válidas.');
     const expensesById = new Map(requestValue.expenses.map(item => [item.transactionId, item]));
-    const assignmentsById = new Map(value.assignments.map(item => [item.transactionId, item]));
-    const splitIds = new Set();
-    for (const split of value.expenseSplits || []) {
+    const splitById = new Map();
+    const expectedSplitBudgets = new Map();
+    const assignmentById = new Map();
+    for (const split of splits) {
       const item = split && expensesById.get(split.transactionId);
-      if (!item || splitIds.has(split.transactionId) || item.settlementIncomeId !== null || !item.active || !Array.isArray(split.parts) || split.parts.length !== 2) throw new Error('A resposta contém uma divisão de despesa inválida.');
-      splitIds.add(split.transactionId);
+      if (!item || splitById.has(split.transactionId) || item.settlementIncomeId !== null || !item.active || !Array.isArray(split.parts) || split.parts.length !== 2) throw new Error('A resposta contém uma divisão de despesa inválida.');
       let total = 0;
       let firstBudgetId = null;
       for (const part of split.parts) {
@@ -235,10 +220,59 @@
         total += cents;
       }
       if (total !== Math.round(item.amount * 100)) throw new Error('A soma das partes tem de ser igual ao valor original da despesa.');
-      const assignment = assignmentsById.get(item.transactionId);
-      if (firstBudgetId !== null) {
-        if (!assignment || assignment.budgetId !== firstBudgetId || settlementExpenseIds.has(item.transactionId)) throw new Error('A classificação da despesa dividida é inconsistente.');
-      } else if (assignment) throw new Error('Uma despesa dividida sem orçamento não deve conter classificação.');
+      splitById.set(split.transactionId, split);
+      expectedSplitBudgets.set(split.transactionId, firstBudgetId);
+    }
+    const movementIds = new Set();
+    for (const assignment of value.assignments) {
+      if (!validId(assignment.transactionId) || !validId(assignment.budgetId) || movementIds.has(assignment.transactionId)) throw new Error('A resposta contém uma classificação inválida ou repetida.');
+      const item = expensesById.get(assignment.transactionId);
+      if (!item || !item.budgets.some(budget => budget.id === assignment.budgetId)) throw new Error('A resposta escolhe um orçamento que não consta no pedido.');
+      movementIds.add(assignment.transactionId);
+      assignmentById.set(assignment.transactionId, assignment);
+    }
+    for (const [transactionId, split] of splitById) {
+      const expected = expectedSplitBudgets.get(transactionId);
+      const assignment = assignmentById.get(transactionId);
+      if (expected === null ? Boolean(assignment) : assignment?.budgetId !== expected) throw new Error('A classificação da despesa dividida é inconsistente.');
+    }
+    const incomeIds = new Set();
+    const settlementExpenseIds = new Set();
+    const settlementPartIds = new Set();
+    for (const settlement of value.settlements) {
+      const expenseIds = settlement?.expenseIds || [];
+      const partRefs = settlement?.expensePartRefs || [];
+      if (!validId(settlement?.incomeId) || incomeIds.has(settlement.incomeId) || !Array.isArray(expenseIds) || !Array.isArray(partRefs) || expenseIds.length + partRefs.length < 1 || expenseIds.length + partRefs.length > 500) throw new Error('A resposta contém uma liquidação inválida.');
+      const income = requestValue.incomes.find(item => item.transactionId === settlement.incomeId);
+      if (!income) throw new Error('A resposta contém uma receita que não consta no pedido.');
+      incomeIds.add(settlement.incomeId);
+      let totalCents = 0;
+      const selectedIds = new Set();
+      for (const expenseId of expenseIds) {
+        if (!validId(expenseId) || selectedIds.has(expenseId) || movementIds.has(expenseId)) throw new Error('A resposta repete uma despesa ou movimento.');
+        const item = expensesById.get(expenseId);
+        if (!item || (item.settlementIncomeId !== null && item.settlementIncomeId !== settlement.incomeId)) throw new Error('A resposta escolhe uma despesa que não consta nesta liquidação.');
+        selectedIds.add(expenseId);
+        settlementExpenseIds.add(expenseId);
+        movementIds.add(expenseId);
+        totalCents += Math.round(item.amount * 100);
+      }
+      const refsInThisSettlement = new Set();
+      for (const ref of partRefs) {
+        if (!ref || !validId(ref.transactionId) || !Number.isInteger(ref.partIndex) || ref.partIndex < 0 || ref.partIndex > 1) throw new Error('A liquidação contém uma parcela inválida.');
+        const key = `${ref.transactionId}:${ref.partIndex}`;
+        const split = splitById.get(ref.transactionId);
+        const part = split?.parts[ref.partIndex];
+        if (!part || part.budgetId !== null || refsInThisSettlement.has(key) || settlementPartIds.has(key) || selectedIds.has(ref.transactionId)) throw new Error('A resposta repete uma parcela ou escolhe uma parcela indisponível.');
+        refsInThisSettlement.add(key);
+        settlementPartIds.add(key);
+        totalCents += Math.round(part.amount * 100);
+      }
+      if (totalCents !== Math.round(income.amount * 100)) throw new Error('As despesas da liquidação têm de igualar exatamente o valor da receita.');
+    }
+    for (const expenseId of settlementExpenseIds) {
+      const split = splitById.get(expenseId);
+      if (split && (split.parts.some(part => part.budgetId !== null) || settlementPartIds.has(`${expenseId}:0`) || settlementPartIds.has(`${expenseId}:1`))) throw new Error('Uma divisão deve liquidar parcelas individuais sem orçamento.');
     }
   }
 
@@ -317,13 +351,31 @@
     return Math.round(amount * 100);
   }
 
-  function splitBudgeted(expenseId) {
-    const split = expenseSplits.get(expenseId);
-    return Boolean(split && split.parts.some(part => part.budgetId !== null));
+  function removeFromSettlements(expenseId) {
+    settlementSelections.forEach(selected => {
+      selected.delete(expenseId);
+      selected.delete(settlementPartKey(expenseId, 0));
+      selected.delete(settlementPartKey(expenseId, 1));
+    });
   }
 
-  function removeFromSettlements(expenseId) {
-    settlementSelections.forEach(selected => selected.delete(expenseId));
+  function settlementPartKey(transactionId, partIndex) {
+    return `part:${transactionId}:${partIndex}`;
+  }
+
+  function removeSettlementItem(key) {
+    settlementSelections.forEach(selected => selected.delete(key));
+  }
+
+  function settlementItemAmountCents(key) {
+    if (typeof key === 'number') {
+      const item = expenseItem(key);
+      return item ? Math.round(item.amount * 100) : 0;
+    }
+    const match = /^part:(\d+):([01])$/.exec(String(key));
+    if (!match) return 0;
+    const split = expenseSplits.get(Number(match[1]));
+    return split ? (amountCents(split.parts[Number(match[2])].amountText) || 0) : 0;
   }
 
   function updateExpenseSplitTotal(item) {
@@ -356,10 +408,7 @@
 
   function settlementTotal(incomeId) {
     const selected = settlementSelections.get(incomeId) || new Set();
-    return [...selected].reduce((sum, id) => {
-      const item = expenseItem(id);
-      return sum + (item ? Math.round(item.amount * 100) : 0);
-    }, 0);
+    return [...selected].reduce((sum, key) => sum + settlementItemAmountCents(key), 0);
   }
 
   function renderExpenses() {
@@ -397,6 +446,7 @@
           titleInput.setAttribute('aria-label', `Descrição da parte ${partIndex + 1}`);
           titleInput.addEventListener('input', () => {
             expenseSplits.get(item.transactionId).parts[partIndex].title = titleInput.value;
+            renderSettlementList();
             updateCompletion();
           });
           const amountInput = document.createElement('input');
@@ -408,6 +458,7 @@
           amountInput.addEventListener('input', () => {
             expenseSplits.get(item.transactionId).parts[partIndex].amountText = amountInput.value;
             updateExpenseSplitTotal(item);
+            renderSettlementList();
             updateCompletion();
           });
           partCard.append(partHeading, titleInput, amountInput);
@@ -431,7 +482,7 @@
             select.addEventListener('change', () => {
               const current = expenseSplits.get(item.transactionId);
               current.parts[partIndex].budgetId = select.value ? Number(select.value) : null;
-              if (current.parts.some(value => value.budgetId !== null)) removeFromSettlements(item.transactionId);
+              if (current.parts[partIndex].budgetId !== null) removeSettlementItem(settlementPartKey(item.transactionId, partIndex));
               renderExpenses();
               renderSettlementList();
               updateCompletion();
@@ -491,6 +542,7 @@
             const firstBudget = current.parts[0].budgetId;
             const sameBudget = current.parts[1].budgetId === firstBudget;
             expenseSplits.delete(item.transactionId);
+            removeFromSettlements(item.transactionId);
             if (sameBudget && firstBudget !== null) budgetSelections.set(item.transactionId, firstBudget);
             else budgetSelections.delete(item.transactionId);
           } else {
@@ -499,11 +551,11 @@
             const second = cents - first;
             const originalBudget = budgetSelections.get(item.transactionId) || null;
             budgetSelections.delete(item.transactionId);
+            removeFromSettlements(item.transactionId);
             expenseSplits.set(item.transactionId, { parts: [
               { title: item.displayTitle, amountText: (first / 100).toFixed(2).replace('.', ','), budgetId: originalBudget },
               { title: `${item.displayTitle} (parte 2)`, amountText: (second / 100).toFixed(2).replace('.', ','), budgetId: originalBudget }
             ] });
-            if (originalBudget !== null) removeFromSettlements(item.transactionId);
           }
           renderExpenses();
           renderSettlementList();
@@ -535,25 +587,23 @@
       meta.textContent = `${date.toLocaleDateString('pt-PT')} · receita ${money(income.amount)}`;
       card.append(title, meta);
       const selected = settlementSelections.get(income.transactionId) || new Set();
-      request.expenses.forEach(item => {
-        if (budgetSelections.has(item.transactionId) || splitBudgeted(item.transactionId)) return;
+      function addExpenseRow(item, key, labelText, disabled = false) {
         const row = document.createElement('div');
         row.className = 'settlement-row';
         const checkbox = document.createElement('input');
         checkbox.type = 'checkbox';
-        checkbox.id = `settle-${income.transactionId}-${item.transactionId}`;
-        checkbox.checked = selected.has(item.transactionId);
-        const selectedElsewhere = selectedByOtherIncome(item.transactionId, income.transactionId);
+        checkbox.id = `settle-${income.transactionId}-${String(key).replaceAll(':', '-')}`;
+        checkbox.checked = selected.has(key);
+        const selectedElsewhere = selectedByOtherIncome(key, income.transactionId);
         const linkedElsewhere = item.settlementIncomeId !== null && item.settlementIncomeId !== income.transactionId;
-        checkbox.disabled = selectedElsewhere || linkedElsewhere;
+        checkbox.disabled = disabled || selectedElsewhere || linkedElsewhere;
         const label = document.createElement('label');
         label.htmlFor = checkbox.id;
-        const dateLabel = new Date(item.date).toLocaleDateString('pt-PT');
-        label.textContent = `${item.displayTitle} · ${dateLabel} · ${money(item.amount)}${item.settlementIncomeId === income.transactionId ? ' · atualmente liquidada aqui' : ''}`;
+        label.textContent = labelText;
         checkbox.addEventListener('change', () => {
           const next = new Set(settlementSelections.get(income.transactionId) || []);
-          if (checkbox.checked) next.add(item.transactionId);
-          else next.delete(item.transactionId);
+          if (checkbox.checked) next.add(key);
+          else next.delete(key);
           settlementSelections.set(income.transactionId, next);
           renderExpenses();
           renderSettlementList();
@@ -561,6 +611,23 @@
         });
         row.append(checkbox, label);
         card.append(row);
+      }
+      request.expenses.forEach(item => {
+        const dateLabel = new Date(item.date).toLocaleDateString('pt-PT');
+        const split = expenseSplits.get(item.transactionId);
+        if (split) {
+          split.parts.forEach((part, partIndex) => {
+            if (part.budgetId !== null) return;
+            const key = settlementPartKey(item.transactionId, partIndex);
+            const cents = amountCents(part.amountText);
+            const partTitle = part.title.trim() || `Parcela ${partIndex + 1}`;
+            const amountText = cents === null ? 'valor inválido' : money(cents / 100);
+            addExpenseRow(item, key, `${partTitle} · ${dateLabel} · ${amountText}`, cents === null);
+          });
+          return;
+        }
+        if (budgetSelections.has(item.transactionId)) return;
+        addExpenseRow(item, item.transactionId, `${item.displayTitle} · ${dateLabel} · ${money(item.amount)}${item.settlementIncomeId === income.transactionId ? ' · atualmente liquidada aqui' : ''}`);
       });
       const total = settlementTotal(income.transactionId);
       const target = Math.round(income.amount * 100);
@@ -578,10 +645,15 @@
       const firstBudgetedPart = split.parts.find(part => part.budgetId !== null);
       if (firstBudgetedPart) assignments.push({ transactionId, budgetId: firstBudgetedPart.budgetId });
     });
-    const settlements = request.incomes.map(income => ({
-      incomeId: income.transactionId,
-      expenseIds: [...(settlementSelections.get(income.transactionId) || new Set())]
-    })).filter(settlement => settlement.expenseIds.length > 0);
+    const settlements = request.incomes.map(income => {
+      const selected = [...(settlementSelections.get(income.transactionId) || new Set())];
+      const expenseIds = selected.filter(key => typeof key === 'number');
+      const expensePartRefs = selected.filter(key => typeof key === 'string').map(key => {
+        const match = /^part:(\d+):([01])$/.exec(key);
+        return match ? { transactionId: Number(match[1]), partIndex: Number(match[2]) } : null;
+      }).filter(Boolean);
+      return { incomeId: income.transactionId, expenseIds, expensePartRefs };
+    }).filter(settlement => settlement.expenseIds.length + settlement.expensePartRefs.length > 0);
     const expenseSplitsJson = [...expenseSplits.entries()].map(([transactionId, split]) => ({
       transactionId,
       parts: split.parts.map(part => ({ title: part.title.trim(), amount: (amountCents(part.amountText) || 0) / 100, budgetId: part.budgetId }))
@@ -604,11 +676,11 @@
       if (selected.size > 0 && settlementTotal(income.transactionId) !== Math.round(income.amount * 100)) invalidSettlement = true;
     }
     const response = currentResponse();
-    const hasAction = response.assignments.length > 0 || response.settlements.length > 0;
+    const hasAction = response.assignments.length > 0 || response.settlements.length > 0 || response.expenseSplits.length > 0;
     sendButton.disabled = invalidSettlement || invalidSplit || !hasAction;
     if (invalidSplit) completion.textContent = 'A soma das partes tem de igualar exatamente o valor original da despesa.';
     else if (invalidSettlement) completion.textContent = 'Ajusta cada liquidação até o total ficar exatamente igual à receita.';
-    else if (!hasAction) completion.textContent = 'Escolhe pelo menos um orçamento ou uma liquidação válida.';
+    else if (!hasAction) completion.textContent = 'Classifica, divide ou liquida pelo menos um movimento.';
     else completion.textContent = `${response.assignments.length} despesas classificadas · ${response.settlements.length} liquidações válidas · ${response.expenseSplits.length} despesas divididas.`;
   }
 

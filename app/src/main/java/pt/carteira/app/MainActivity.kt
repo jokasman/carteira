@@ -228,7 +228,7 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
                 preview.requestId,
                 preview.assignments.map{ClassificationResponseAssignment(it.transactionId,it.budgetId)}+
                     preview.expenseSplits.mapNotNull{split->split.parts.firstNotNullOfOrNull{part->part.budgetId?.let{ClassificationResponseAssignment(split.transactionId,it)}}},
-                preview.settlements.map{ClassificationResponseSettlement(it.incomeId,it.expenseIds)},
+                preview.settlements.map{ClassificationResponseSettlement(it.incomeId,it.expenseIds,it.expensePartRefs)},
                 preview.expenseSplits.map{split->ClassificationResponseExpenseSplit(split.transactionId,split.parts.map{ClassificationResponseExpensePart(it.title,it.amount,it.budgetId)})}
             )
             val validated=validateClassificationAssignments(request,response)
@@ -245,13 +245,15 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
     ):ValidatedClassificationChanges{
         if(response.requestId!=request.requestId) error("A resposta não corresponde ao pedido original.")
         if(System.currentTimeMillis()-request.createdAt>30L*24*60*60*1000) error("Este pedido expirou. Cria um pedido novo.")
-        if(response.assignments.isEmpty()&&response.settlements.isEmpty())error("A resposta não contém classificações nem liquidações.")
+        if(response.assignments.isEmpty()&&response.settlements.isEmpty()&&response.expenseSplits.isEmpty())error("A resposta não contém classificações, divisões nem liquidações.")
         val requestedExpenses=request.expenses.associateBy{it.transactionId}
         val requestedIncomes=request.incomes.associateBy{it.transactionId}
         if(response.assignments.any{it.transactionId !in requestedExpenses}||response.settlements.any{it.incomeId !in requestedIncomes}||response.expenseSplits.any{it.transactionId !in requestedExpenses})
             error("A resposta contém movimentos que não pertencem ao pedido.")
         if(response.settlements.any{settlement->settlement.expenseIds.any{it !in requestedExpenses}})
             error("A liquidação contém despesas que não pertencem ao pedido.")
+        if(response.settlements.any{settlement->settlement.expensePartRefs.any{it.transactionId !in requestedExpenses}})
+            error("A liquidação contém parcelas que não pertencem ao pedido.")
         val stored=dao.transactionsByIds(request.expenses.map{it.transactionId}+request.incomes.map{it.transactionId}).associateBy{it.id}
         val budgets=dao.allBudgets().associateBy{it.id}
         val splitByExpense=response.expenseSplits.associateBy{it.transactionId}
@@ -315,9 +317,13 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
             }
         }
         val splitExpensesProcessed=mutableSetOf<Long>()
-        fun splitTransactions(source:FinanceTransaction,split:ClassificationResponseExpenseSplit,settlementIncomeId:Long?):List<FinanceTransaction>{
+        val partSettlementIncomeIds=response.settlements.flatMap{settlement->
+            settlement.expensePartRefs.map{ref->(ref.transactionId to ref.partIndex) to settlement.incomeId}
+        }.toMap()
+        fun splitTransactions(source:FinanceTransaction,split:ClassificationResponseExpenseSplit,wholeExpenseSettlementIncomeId:Long?):List<FinanceTransaction>{
             val sign=if(source.amount<0)-1 else 1
             return split.parts.mapIndexed{index,part->
+                val settlementIncomeId=partSettlementIncomeIds[source.id to index]?:wholeExpenseSettlementIncomeId
                 source.copy(
                     id=if(index==0)source.id else 0,
                     title=part.title.trim(),
@@ -345,6 +351,15 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
                 error("A receita ‘${incomeItem.displayTitle}’ foi alterada ou já não está disponível para liquidar.")
             val expenseItems=settlement.expenseIds.map{id->requestedExpenses[id]?:error("Uma despesa da liquidação não pertence ao pedido.")}
             val expenses=settlement.expenseIds.map{id->stored[id]?:error("Uma despesa da liquidação já não existe. Cria um pedido novo.")}
+            val selectedSplitParts=settlement.expensePartRefs.map{ref->
+                val item=requestedExpenses[ref.transactionId]?:error("Uma parcela da liquidação não pertence ao pedido.")
+                val source=stored[ref.transactionId]?:error("A despesa de uma parcela já não existe. Cria um pedido novo.")
+                val split=splitByExpense[ref.transactionId]?:error("Falta uma divisão de despesa referida na liquidação.")
+                val part=split.parts.getOrNull(ref.partIndex)?:error("A liquidação refere uma parcela inválida.")
+                if(part.budgetId!=null||source.kind!="Despesa"||!source.active||source.settlementRevenueId!=null||!item.active||item.settlementIncomeId!=null)
+                    error("Só é possível liquidar parcelas ativas e sem orçamento.")
+                Triple(ref,item,part)
+            }
             val validExpenses=expenses.zip(expenseItems).all{(expense,item)->
                 if(!expense.amount.isFinite())return@all false
                 val amount=BigDecimal.valueOf(kotlin.math.abs(expense.amount)).setScale(2,RoundingMode.HALF_UP)
@@ -355,7 +370,9 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
                     expense.title==item.title&&expense.date==item.date&&amount.compareTo(requestedAmount)==0
             }
             if(!validExpenses)error("Uma despesa escolhida para liquidar foi alterada, atribuída ou já não está disponível.")
-            val total=expenses.fold(BigDecimal.ZERO){sum,expense->sum.add(BigDecimal.valueOf(kotlin.math.abs(expense.amount)).setScale(2,RoundingMode.HALF_UP))}.setScale(2,RoundingMode.HALF_UP)
+            val regularTotal=expenses.fold(BigDecimal.ZERO){sum,expense->sum.add(BigDecimal.valueOf(kotlin.math.abs(expense.amount)).setScale(2,RoundingMode.HALF_UP))}
+            val splitPartTotal=selectedSplitParts.fold(BigDecimal.ZERO){sum,(_,_,part)->sum.add(BigDecimal.valueOf(part.amount).setScale(2,RoundingMode.UNNECESSARY))}
+            val total=regularTotal.add(splitPartTotal).setScale(2,RoundingMode.HALF_UP)
             if(total.compareTo(incomeAmount)!=0)error("As despesas escolhidas para ‘${incomeItem.displayTitle}’ não somam exatamente o valor da receita.")
             incomeUpdates+=income.copy(active=false)
             val selectedIds=settlement.expenseIds.toSet()
@@ -371,13 +388,14 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
             }
             val expenseTitles=expenseItems.mapIndexed{index,item->
                 splitByExpense[item.transactionId]?.parts?.map{it.title.trim()}?:listOf(item.displayTitle)
-            }.flatten()
+            }.flatten()+selectedSplitParts.map{(_,_,part)->part.title.trim()}
             settlementPreview+=ClassificationImportSettlement(
                 incomeId=income.id,
                 incomeTitle=incomeItem.displayTitle,
                 incomeAmount=incomeAmount.toDouble(),
                 expenseIds=expenses.map{it.id},
-                expenseTitles=expenseTitles
+                expenseTitles=expenseTitles,
+                expensePartRefs=settlement.expensePartRefs
             )
         }
         response.expenseSplits.forEach{split->

@@ -41,7 +41,12 @@ internal data class ClassificationRequest(
 )
 
 internal data class ClassificationResponseAssignment(val transactionId: Long, val budgetId: Long)
-internal data class ClassificationResponseSettlement(val incomeId: Long, val expenseIds: List<Long>)
+internal data class ClassificationResponseExpensePartRef(val transactionId: Long, val partIndex: Int)
+internal data class ClassificationResponseSettlement(
+    val incomeId: Long,
+    val expenseIds: List<Long>,
+    val expensePartRefs: List<ClassificationResponseExpensePartRef> = emptyList()
+)
 internal data class ClassificationResponseExpensePart(val title: String, val amount: Double, val budgetId: Long?)
 internal data class ClassificationResponseExpenseSplit(val transactionId: Long, val parts: List<ClassificationResponseExpensePart>)
 
@@ -64,7 +69,8 @@ internal data class ClassificationImportSettlement(
     val incomeTitle: String,
     val incomeAmount: Double,
     val expenseIds: List<Long>,
-    val expenseTitles: List<String>
+    val expenseTitles: List<String>,
+    val expensePartRefs: List<ClassificationResponseExpensePartRef> = emptyList()
 )
 
 internal data class ClassificationImportExpensePart(
@@ -205,7 +211,7 @@ internal fun parseClassificationResponse(raw: String): ClassificationResponse {
     val assignmentsJson = root.optJSONArray("assignments") ?: error("A resposta não contém classificações.")
     val settlementsJson = root.optJSONArray("settlements") ?: JSONArray()
     val expenseSplitsJson = root.optJSONArray("expenseSplits") ?: JSONArray()
-    require(assignmentsJson.length() + settlementsJson.length() in 1..500 && assignmentsJson.length() + settlementsJson.length() + expenseSplitsJson.length() <= 500) { "A resposta não contém alterações válidas." }
+    require(assignmentsJson.length() + settlementsJson.length() + expenseSplitsJson.length() in 1..500) { "A resposta não contém alterações válidas." }
     val seenExpenseIds = mutableSetOf<Long>()
     val assignments = (0 until assignmentsJson.length()).map { index ->
         val value = assignmentsJson.getJSONObject(index)
@@ -217,18 +223,29 @@ internal fun parseClassificationResponse(raw: String): ClassificationResponse {
         ClassificationResponseAssignment(transactionId, budgetId)
     }
     val seenIncomeIds = mutableSetOf<Long>()
+    val seenPartRefs = mutableSetOf<Pair<Long, Int>>()
     val settlements = (0 until settlementsJson.length()).map { index ->
         val value = settlementsJson.getJSONObject(index)
         val incomeId = value.getLong("incomeId")
         require(incomeId > 0 && seenIncomeIds.add(incomeId)) { "A resposta contém uma receita repetida." }
-        val expenseIdsJson = value.optJSONArray("expenseIds") ?: error("Faltam despesas numa liquidação.")
-        require(expenseIdsJson.length() in 1..500) { "Uma liquidação precisa de pelo menos uma despesa." }
+        val expenseIdsJson = value.optJSONArray("expenseIds") ?: JSONArray()
+        val expensePartRefsJson = value.optJSONArray("expensePartRefs") ?: JSONArray()
+        require(expenseIdsJson.length() + expensePartRefsJson.length() in 1..500) { "Uma liquidação precisa de pelo menos uma despesa ou parcela." }
         val expenseIds = (0 until expenseIdsJson.length()).map { expenseIndex ->
             val expenseId = expenseIdsJson.getLong(expenseIndex)
             require(expenseId > 0 && seenExpenseIds.add(expenseId)) { "Uma despesa foi repetida ou usada em mais de uma decisão." }
             expenseId
         }
-        ClassificationResponseSettlement(incomeId, expenseIds)
+        val expensePartRefs = (0 until expensePartRefsJson.length()).map { refIndex ->
+            val ref = expensePartRefsJson.getJSONObject(refIndex)
+            val transactionId = ref.getLong("transactionId")
+            val partIndex = ref.getInt("partIndex")
+            require(transactionId > 0 && partIndex in 0..1 && seenPartRefs.add(transactionId to partIndex)) {
+                "Uma parcela foi repetida ou usada em mais de uma liquidação."
+            }
+            ClassificationResponseExpensePartRef(transactionId, partIndex)
+        }
+        ClassificationResponseSettlement(incomeId, expenseIds, expensePartRefs)
     }
     val assignmentsByExpense = assignments.associateBy { it.transactionId }
     val settlementExpenseIds = settlements.flatMap { it.expenseIds }.toSet()
@@ -260,6 +277,24 @@ internal fun parseClassificationResponse(raw: String): ClassificationResponse {
         }
         ClassificationResponseExpenseSplit(transactionId, parts)
     }
+    val splitsByExpense = expenseSplits.associateBy { it.transactionId }
+    val settlementPartRefKeys = settlements.flatMap { settlement -> settlement.expensePartRefs.map { it.transactionId to it.partIndex } }.toSet()
+    settlements.forEach { settlement ->
+        settlement.expensePartRefs.forEach { ref ->
+            val split = splitsByExpense[ref.transactionId] ?: error("A liquidação refere uma parcela que não foi dividida na resposta.")
+            require(split.parts[ref.partIndex].budgetId == null && ref.transactionId !in settlement.expenseIds) {
+                "Só é possível liquidar parcelas sem orçamento, individualmente."
+            }
+        }
+        settlement.expenseIds.forEach { expenseId ->
+            val split = splitsByExpense[expenseId]
+            if (split != null) {
+                require(split.parts.all { it.budgetId == null } && (expenseId to 0) !in settlementPartRefKeys && (expenseId to 1) !in settlementPartRefKeys) {
+                    "Uma despesa dividida deve liquidar parcelas sem orçamento individualmente."
+                }
+            }
+        }
+    }
     return ClassificationResponse(requestId, assignments, settlements, expenseSplits)
 }
 
@@ -277,6 +312,11 @@ internal fun ClassificationResponse.toJson(): JSONObject = JSONObject()
             put(JSONObject()
                 .put("incomeId", settlement.incomeId)
                 .put("expenseIds", JSONArray().apply { settlement.expenseIds.forEach { put(it) } })
+                .put("expensePartRefs", JSONArray().apply {
+                    settlement.expensePartRefs.forEach { ref ->
+                        put(JSONObject().put("transactionId", ref.transactionId).put("partIndex", ref.partIndex))
+                    }
+                })
             )
         }
     })

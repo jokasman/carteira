@@ -5,7 +5,7 @@ Atualizado em 8 de novembro de 2026.
 ## Repositório e publicação
 
 - Repositório: `jokasman/carteira`; branch de produção: `main`.
-- A divisão de despesas na classificação partilhada substitui a divisão de receitas anterior; a página e a Carteira dividem uma despesa em duas partes.
+- A divisão de despesas na classificação partilhada substitui a divisão de receitas anterior; as partes são movimentos independentes na Carteira e podem voltar a ser divididas.
 - GitHub Pages está ativo a partir de `main` e `/docs`: https://jokasman.github.io/carteira/classificacao/.
 - A página estática vive em `docs/classificacao/index.html`.
 - As ligações antigas com pedidos/respostas embutidos são mantidas em `docs/classificacao/legacy.html` para não interromper classificações já partilhadas.
@@ -17,8 +17,8 @@ Atualizado em 8 de novembro de 2026.
 3. Para alterar uma liquidação existente, é necessário selecionar a receita e todas as despesas que já lhe estão associadas.
 4. A app abre o seletor de ficheiros do Android para guardar o pedido JSON no dispositivo e depois abre a página de classificação no GitHub Pages. O remetente carrega o JSON na página; esta envia-o à API Worker e gera um link curto.
 5. O destinatário abre o link e decide os orçamentos/liquidações. Também pode dividir uma despesa ativa em duas partes, atribuir nome, valor e orçamento opcional a cada parte. Não precisa de descarregar ou carregar ficheiros nem de instalar a app.
-6. A soma das partes da despesa tem de ser exatamente igual ao movimento original. Se as partes tiverem orçamento, a despesa dividida sai da lista de liquidações; sem orçamento, pode ser liquidada pelo valor total original. As liquidações continuam a exigir igualdade exata.
-7. O destinatário avisa o remetente quando termina. O remetente abre o mesmo link, descarrega o JSON e, na app, abre **Movimentos → Resposta**, escolhe o ficheiro, revê a pré-visualização das partes e toca em **Aplicar decisões**. A Carteira divide a despesa e aplica orçamentos/liquidações numa transação local.
+6. A soma das partes da despesa tem de ser exatamente igual ao movimento original. Cada parte sem orçamento aparece separadamente na lista de liquidação; as partes com orçamento ficam fora dessa lista. É possível guardar só a divisão. A igualdade exata das liquidações continua a ser validada em cêntimos.
+7. O destinatário avisa o remetente quando termina. O remetente abre o mesmo link, descarrega o JSON e, na app, abre **Movimentos → Resposta**, revê as partes e toca em **Aplicar decisões**. A Carteira guarda cada parte como um movimento independente, com o orçamento e a liquidação que lhe correspondem; esses movimentos podem voltar a ser divididos na app.
 
 ## Limites de privacidade
 
@@ -27,7 +27,7 @@ Atualizado em 8 de novembro de 2026.
 - O pedido e a resposta ficam no Cloudflare D1; o link expira após 30 dias e os dados expirados são limpos em chamadas seguintes à API. O link contém um token aleatório; qualquer pessoa com esse link consegue consultar os movimentos e a resposta.
 - O token fica no fragmento do link e no corpo dos pedidos à API, nunca na query string. O Worker guarda o token como hash. A API limita novas tarefas a 10 por endereço de rede por dia e limpa hashes dos dias anteriores em chamadas à API.
 - O pedido original fica na área privada da app por até 30 dias, é excluído das cópias de segurança Android e é apagado após importação bem-sucedida.
-- A app volta a validar o pedido, o estado atual dos movimentos, a disponibilidade dos orçamentos, os valores e nomes das partes e a igualdade exata dos totais. Cria e liquida as despesas divididas na mesma transação local.
+- A app volta a validar o pedido, o estado atual dos movimentos, a disponibilidade dos orçamentos, os valores e nomes das partes e a igualdade exata dos totais. Cria as partes e liga cada liquidação às parcelas selecionadas na mesma transação local.
 
 ## Android e entrega de APK
 
@@ -52,4 +52,4 @@ Atualizado em 8 de novembro de 2026.
 
 ## Prompt para continuar noutra conversa
 
-Continua o desenvolvimento da app Android Carteira neste repositório: https://github.com/jokasman/carteira. Lê primeiro `README.md` e `docs/estado-atual.md`; confirma a branch, o estado local e o `origin/main` antes de alterar. Mantém o `applicationId` `pt.jokasman.carteira` e a assinatura atual. A importação bancária continua por CSV; não retomes Enable Banking ou Firebase. A classificação partilhada usa GitHub Pages + API Cloudflare Worker/D1, com retenção de 30 dias: o remetente carrega o pedido JSON na página e envia o link; o classificador não troca ficheiros; o remetente abre o mesmo link e descarrega o JSON de resposta para importar. Só podem ser partilhados os movimentos explicitamente selecionados. No link, despesas podem ser divididas em duas partes com total exato e orçamento opcional por parte; o JSON é revisto na app antes de aplicar. O Worker Cloudflare e a D1 estão ativos na conta reclamada; o GitHub Pages serve a interface e chama a API. Se houver um APK novo, guarda-o em Ambiente de Trabalho/Carteira APKs e não adiciones APKs nem pastas de build ao Git.
+Continua o desenvolvimento da app Android Carteira neste repositório: https://github.com/jokasman/carteira. Lê primeiro `README.md` e `docs/estado-atual.md`; confirma a branch, o estado local e o `origin/main` antes de alterar. Mantém o `applicationId` `pt.jokasman.carteira` e a assinatura atual. A importação bancária continua por CSV; não retomes Enable Banking ou Firebase. A classificação partilhada usa GitHub Pages + API Cloudflare Worker/D1, com retenção de 30 dias: o remetente carrega o pedido JSON na página e envia o link; o classificador não troca ficheiros; o remetente abre o mesmo link e descarrega o JSON de resposta para importar. Só podem ser partilhados os movimentos explicitamente selecionados. No link, cada despesa pode ser dividida em duas partes com total exato e orçamento opcional por parte; parcelas sem orçamento podem ser liquidadas individualmente. A Carteira grava cada parcela como movimento normal, passível de nova divisão. O Worker Cloudflare e a D1 estão ativos na conta reclamada; o GitHub Pages serve a interface e chama a API. Se houver um APK novo, guarda-o em Ambiente de Trabalho/Carteira APKs e não adiciones APKs nem pastas de build ao Git.

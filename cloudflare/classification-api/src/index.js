@@ -137,15 +137,17 @@ function validateResponse(value, requestValue) {
       value.requestId !== requestValue.requestId) {
     throw invalid("A resposta não corresponde ao pedido Carteira.");
   }
-  if (!Array.isArray(value.assignments) || !Array.isArray(value.settlements) ||
-      value.assignments.length + value.settlements.length < 1 ||
-      value.assignments.length + value.settlements.length > MAX_MOVEMENTS) {
+  const splits = value.expenseSplits || [];
+  if (!Array.isArray(value.assignments) || !Array.isArray(value.settlements) || !Array.isArray(splits) ||
+      value.assignments.length + value.settlements.length + splits.length < 1 ||
+      value.assignments.length + value.settlements.length + splits.length > MAX_MOVEMENTS) {
     throw invalid("A resposta não contém decisões válidas.");
   }
 
   const expensesById = new Map(requestValue.expenses.map((expense) => [expense.transactionId, expense]));
   const incomesById = new Map(requestValue.incomes.map((income) => [income.transactionId, income]));
   const decisionExpenseIds = new Set();
+  const assignmentsById = new Map();
   for (const assignment of value.assignments) {
     if (!isObject(assignment) || !validId(assignment.transactionId) || !validId(assignment.budgetId) ||
         decisionExpenseIds.has(assignment.transactionId)) {
@@ -156,13 +158,52 @@ function validateResponse(value, requestValue) {
       throw invalid("A resposta escolhe um orçamento que não consta no pedido.");
     }
     decisionExpenseIds.add(assignment.transactionId);
+    assignmentsById.set(assignment.transactionId, assignment);
+  }
+
+  const splitsById = new Map();
+  const expectedBudgetsById = new Map();
+  for (const split of splits) {
+    const expense = isObject(split) ? expensesById.get(split.transactionId) : null;
+    if (!expense || splitsById.has(split.transactionId) || expense.settlementIncomeId !== null || !expense.active ||
+        !Array.isArray(split.parts) || split.parts.length !== 2) {
+      throw invalid("A resposta contém uma divisão de despesa inválida.");
+    }
+    let totalCents = 0;
+    let firstBudgetId = null;
+    for (const part of split.parts) {
+      if (!isObject(part) || typeof part.title !== "string" || !part.title.trim() || part.title.trim().length > 120 ||
+          !validAmount(part.amount) || (part.budgetId !== null && !validId(part.budgetId))) {
+        throw invalid("Uma parcela da despesa está inválida.");
+      }
+      const cents = toCents(part.amount);
+      if (Math.abs(part.amount * 100 - cents) > 0.000001) throw invalid("O valor de uma parcela tem de usar cêntimos.");
+      if (part.budgetId !== null && !expense.budgets.some((budget) => budget.id === part.budgetId)) {
+        throw invalid("A resposta escolhe um orçamento que não consta no pedido.");
+      }
+      if (firstBudgetId === null && part.budgetId !== null) firstBudgetId = part.budgetId;
+      totalCents += cents;
+    }
+    if (totalCents !== toCents(expense.amount)) throw invalid("A soma das parcelas tem de igualar o valor original da despesa.");
+    splitsById.set(split.transactionId, split);
+    expectedBudgetsById.set(split.transactionId, firstBudgetId);
+  }
+  for (const [expenseId, budgetId] of expectedBudgetsById) {
+    const assignment = assignmentsById.get(expenseId);
+    if ((budgetId === null && assignment) || (budgetId !== null && assignment?.budgetId !== budgetId)) {
+      throw invalid("A classificação da despesa dividida é inconsistente.");
+    }
   }
 
   const incomeIds = new Set();
+  const settledExpenseIds = new Set();
+  const settledPartIds = new Set();
   for (const settlement of value.settlements) {
+    const expenseIds = isObject(settlement) ? settlement.expenseIds || [] : [];
+    const partRefs = isObject(settlement) ? settlement.expensePartRefs || [] : [];
     if (!isObject(settlement) || !validId(settlement.incomeId) || incomeIds.has(settlement.incomeId) ||
-        !Array.isArray(settlement.expenseIds) || settlement.expenseIds.length < 1 ||
-        settlement.expenseIds.length > MAX_MOVEMENTS) {
+        !Array.isArray(expenseIds) || !Array.isArray(partRefs) || expenseIds.length + partRefs.length < 1 ||
+        expenseIds.length + partRefs.length > MAX_MOVEMENTS) {
       throw invalid("A resposta contém uma liquidação inválida.");
     }
     const income = incomesById.get(settlement.incomeId);
@@ -170,7 +211,7 @@ function validateResponse(value, requestValue) {
     incomeIds.add(settlement.incomeId);
     let totalCents = 0;
     const selectedIds = new Set();
-    for (const expenseId of settlement.expenseIds) {
+    for (const expenseId of expenseIds) {
       if (!validId(expenseId) || selectedIds.has(expenseId) || decisionExpenseIds.has(expenseId)) {
         throw invalid("A resposta repete uma despesa ou movimento.");
       }
@@ -180,10 +221,32 @@ function validateResponse(value, requestValue) {
       }
       selectedIds.add(expenseId);
       decisionExpenseIds.add(expenseId);
+      settledExpenseIds.add(expenseId);
       totalCents += toCents(expense.amount);
+    }
+    const selectedPartIds = new Set();
+    for (const ref of partRefs) {
+      if (!isObject(ref) || !validId(ref.transactionId) || !Number.isInteger(ref.partIndex) || ref.partIndex < 0 || ref.partIndex > 1) {
+        throw invalid("A liquidação contém uma parcela inválida.");
+      }
+      const key = `${ref.transactionId}:${ref.partIndex}`;
+      const split = splitsById.get(ref.transactionId);
+      const part = split?.parts[ref.partIndex];
+      if (!part || part.budgetId !== null || selectedIds.has(ref.transactionId) || selectedPartIds.has(key) || settledPartIds.has(key)) {
+        throw invalid("A resposta repete uma parcela ou escolhe uma parcela indisponível.");
+      }
+      selectedPartIds.add(key);
+      settledPartIds.add(key);
+      totalCents += toCents(part.amount);
     }
     if (totalCents !== toCents(income.amount)) {
       throw invalid("As despesas da liquidação têm de igualar exatamente o valor da receita.");
+    }
+  }
+  for (const expenseId of settledExpenseIds) {
+    const split = splitsById.get(expenseId);
+    if (split && (split.parts.some((part) => part.budgetId !== null) || settledPartIds.has(`${expenseId}:0`) || settledPartIds.has(`${expenseId}:1`))) {
+      throw invalid("Uma divisão deve liquidar parcelas sem orçamento individualmente.");
     }
   }
 }
