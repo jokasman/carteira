@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <meta name="color-scheme" content="light">
   <title>Classificar e liquidar · Carteira</title>
   <style>
@@ -47,28 +47,28 @@
   <header>
     <div class="brand">CARTEIRA</div>
     <h1>Classificar e liquidar</h1>
-    <p>Carrega o pedido da Carteira para criar uma ligação, ou abre a ligação recebida para classificar os movimentos e preparar a resposta.</p>
+    <p>Carrega o pedido JSON da Carteira para criar uma ligação curta. Quem recebe classifica diretamente nesta página, sem trocar ficheiros.</p>
   </header>
 
   <section class="card privacy" aria-label="Privacidade">
     <strong>Privacidade</strong>
-    <p style="margin-bottom:0">O pedido é lido neste navegador e os movimentos seguem dentro da ligação, sem serem enviados ao site. Qualquer pessoa com a ligação consegue ver os movimentos incluídos. A resposta contém apenas as escolhas.</p>
+    <p style="margin-bottom:0">Só são enviados os movimentos incluídos no pedido. O pedido e a resposta ficam guardados temporariamente na Cloudflare por até 30 dias. Qualquer pessoa com a ligação pode consultar o pedido e a resposta. Um hash temporário do endereço de rede limita abusos; o endereço original não é guardado na base de dados. O classificador não precisa de iniciar sessão nem de descarregar ou carregar ficheiros.</p>
   </section>
 
   <section id="owner-upload" class="card">
-    <label for="request-file">1. Carregar o pedido da Carteira</label>
+    <label for="request-file">1. Carregar o pedido JSON da Carteira</label>
     <input id="request-file" type="file" accept=".json,application/json">
-    <p class="hint">Este passo é para quem enviou o pedido. Escolhe o ficheiro criado pela app; o conteúdo é validado e lido localmente.</p>
+    <p class="hint">Este passo é para quem enviou o pedido. Escolhe o ficheiro criado pela app; os movimentos selecionados serão guardados temporariamente para gerar a ligação.</p>
     <p id="owner-summary" class="hint"></p>
-    <p id="status" class="status" role="alert" aria-live="polite"></p>
     <div id="request-link-card" class="card hidden">
       <label for="request-link">Ligação para enviar ao classificador</label>
-      <textarea id="request-link" rows="4" readonly aria-label="Ligação do pedido"></textarea>
+      <textarea id="request-link" rows="2" readonly aria-label="Ligação do pedido"></textarea>
       <button id="share-request-link" type="button">Partilhar ligação</button>
       <button id="copy-request-link" type="button">Copiar ligação</button>
       <p id="request-share-status" class="hint" aria-live="polite"></p>
     </div>
   </section>
+  <p id="status" class="status" role="alert" aria-live="polite"></p>
 
   <section id="workspace" class="hidden" aria-live="polite">
     <div class="card">
@@ -79,37 +79,57 @@
     <div id="expense-list"></div>
     <div id="settlement-section" class="hidden">
       <h2>Liquidações</h2>
-      <p class="hint">Seleciona despesas até o total ficar exatamente igual ao valor da receita. Uma despesa só pode pertencer a uma liquidação.</p>
+      <p class="hint">Seleciona despesas até o total ficar exatamente igual ao valor da receita. Uma despesa só pode pertencer a uma liquidação. Despesas com orçamento atribuído deixam de aparecer nesta lista.</p>
       <div id="settlement-list"></div>
     </div>
     <div class="card">
       <div id="completion" class="hint">Escolhe pelo menos um orçamento ou uma liquidação válida.</div>
-      <button id="send-response" type="button" disabled>Partilhar ligação de resposta</button>
-      <p id="share-status" class="hint">A resposta é colocada numa ligação para enviares ao remetente; não é preciso descarregar nem carregar ficheiros.</p>
-      <div id="response-link-card" class="hidden">
-        <label for="response-link">Ligação de resposta</label>
-        <textarea id="response-link" rows="4" readonly aria-label="Ligação de resposta"></textarea>
-        <button id="copy-response-link" type="button">Copiar ligação de resposta</button>
-      </div>
+      <button id="send-response" type="button" disabled>Concluir classificação</button>
+      <p id="share-status" class="hint" aria-live="polite">Ao concluir, a resposta fica disponível no mesmo link. Avisa o remetente para a importar.</p>
+    </div>
+  </section>
+  <section id="classifier-done" class="hidden" aria-live="polite">
+    <div class="card">
+      <h2>Classificação enviada</h2>
+      <p class="hint">A resposta ficou guardada. Avisa o remetente; ele pode abrir o mesmo link e descarregar o JSON para importar na Carteira.</p>
     </div>
   </section>
   <section id="response-workspace" class="hidden">
     <div class="card">
-      <h2>Resposta pronta</h2>
+      <h2>Resposta disponível</h2>
       <p id="response-summary" class="hint"></p>
-      <p class="hint">Esta ligação contém apenas as escolhas feitas. Descarrega o JSON e importa-o em Movimentos → Resposta na Carteira.</p>
+      <p class="hint">A classificação foi concluída. Descarrega o JSON e importa-o em Movimentos → Resposta na Carteira.</p>
       <button id="download-response" type="button">Descarregar resposta JSON</button>
     </div>
   </section>
   <footer>Carteira · classificação de movimentos</footer>
 </main>
 
+<script src="config.js"></script>
 <script>
 (() => {
   'use strict';
+  const workerAppUrl = window.CARTEIRA_CLASSIFICATION_APP_URL;
+  if (location.hostname === 'jokasman.github.io') {
+    const oldPayload = location.hash.slice(1);
+    if (oldPayload.startsWith('pedido=') || oldPayload.startsWith('resposta=')) {
+      const legacyPage = new URL('legacy.html', location.href);
+      legacyPage.hash = oldPayload;
+      location.replace(legacyPage.href);
+      return;
+    }
+    if (workerAppUrl) {
+      const destination = new URL(workerAppUrl);
+      destination.hash = oldPayload;
+      location.replace(destination.href);
+      return;
+    }
+  }
+
   const REQUEST_SCHEMA = 'pt.carteira.classification-request';
   const RESPONSE_SCHEMA = 'pt.carteira.classification-response';
   const VERSION = 2;
+  const API_BASE_URL = new URL('/api/', window.location.origin);
   const fileInput = document.getElementById('request-file');
   const status = document.getElementById('status');
   const ownerUpload = document.getElementById('owner-upload');
@@ -121,9 +141,6 @@
   const responseWorkspace = document.getElementById('response-workspace');
   const responseSummary = document.getElementById('response-summary');
   const downloadResponseButton = document.getElementById('download-response');
-  const responseLinkCard = document.getElementById('response-link-card');
-  const responseLink = document.getElementById('response-link');
-  const copyResponseLinkButton = document.getElementById('copy-response-link');
   const expenseList = document.getElementById('expense-list');
   const settlementSection = document.getElementById('settlement-section');
   const settlementList = document.getElementById('settlement-list');
@@ -133,6 +150,7 @@
   const shareStatus = document.getElementById('share-status');
   let request = null;
   let responseToDownload = null;
+  let taskToken = null;
   let budgetSelections = new Map();
   let settlementSelections = new Map();
 
@@ -199,73 +217,27 @@
     }
   }
 
-  function base64UrlEncode(bytes) {
-    let binary = '';
-    for (let index = 0; index < bytes.length; index += 0x8000) binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
-    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
-  }
-
-  function base64UrlDecode(value) {
-    const base64 = value.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - value.length % 4) % 4);
-    const binary = atob(base64);
-    return Uint8Array.from(binary, character => character.charCodeAt(0));
-  }
-
-  async function readStreamLimited(stream) {
-    const reader = stream.getReader();
-    const chunks = [];
-    let total = 0;
-    while (true) {
-      const result = await reader.read();
-      if (result.done) break;
-      total += result.value.byteLength;
-      if (total > 2 * 1024 * 1024) {
-        await reader.cancel();
-        throw new Error('Os dados da ligação excedem o limite de 2 MB.');
-      }
-      chunks.push(result.value);
+  async function apiCall(operation, payload) {
+    let response;
+    try {
+      response = await fetch(new URL(operation, API_BASE_URL), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
+        credentials: 'omit',
+        body: JSON.stringify(payload)
+      });
+    } catch (_) {
+      throw new Error('Não foi possível contactar o serviço. Confirma a ligação à internet e tenta novamente.');
     }
-    const bytes = new Uint8Array(total);
-    let offset = 0;
-    for (const chunk of chunks) {
-      bytes.set(chunk, offset);
-      offset += chunk.byteLength;
+    let result;
+    try {
+      result = await response.json();
+    } catch (_) {
+      throw new Error('O serviço devolveu uma resposta inválida. Tenta novamente mais tarde.');
     }
-    return bytes;
-  }
-
-  async function encodePayload(value) {
-    const bytes = new TextEncoder().encode(JSON.stringify(value));
-    if (typeof CompressionStream === 'function') {
-      try {
-        const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream('gzip'));
-        const compressed = new Uint8Array(await new Response(stream).arrayBuffer());
-        return 'g.' + base64UrlEncode(compressed);
-      } catch (_) {}
-    }
-    return 'j.' + base64UrlEncode(bytes);
-  }
-
-  async function decodePayload(payload) {
-    const format = payload.slice(0, 2);
-    let bytes = base64UrlDecode(payload.slice(2));
-    if (format === 'g.') {
-      if (typeof DecompressionStream !== 'function') throw new Error('Este navegador não consegue abrir ligações comprimidas. Usa uma versão atualizada.');
-      const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
-      bytes = await readStreamLimited(stream);
-    } else if (format !== 'j.') {
-      throw new Error('O formato da ligação é inválido.');
-    }
-    if (bytes.length > 2 * 1024 * 1024) throw new Error('Os dados da ligação excedem o limite de 2 MB.');
-    return JSON.parse(new TextDecoder().decode(bytes));
-  }
-
-  async function buildShareLink(kind, value) {
-    const payload = await encodePayload(value);
-    const url = new URL(window.location.href);
-    url.hash = kind + '=' + payload;
-    if (url.href.length > 100000) throw new Error('A ligação ficou demasiado longa para enviar. Cria um pedido com menos movimentos.');
-    return url.href;
+    if (!response.ok) throw new Error(result.error || 'O serviço não conseguiu concluir o pedido.');
+    return result;
   }
 
   async function shareOrCopyLink(url, title, message, field, statusTarget) {
@@ -405,6 +377,7 @@
       card.append(title, meta);
       const selected = settlementSelections.get(income.transactionId) || new Set();
       request.expenses.forEach(item => {
+        if (budgetSelections.has(item.transactionId)) return;
         const row = document.createElement('div');
         row.className = 'settlement-row';
         const checkbox = document.createElement('input');
@@ -413,8 +386,7 @@
         checkbox.checked = selected.has(item.transactionId);
         const selectedElsewhere = selectedByOtherIncome(item.transactionId, income.transactionId);
         const linkedElsewhere = item.settlementIncomeId !== null && item.settlementIncomeId !== income.transactionId;
-        const hasBudget = budgetSelections.has(item.transactionId);
-        checkbox.disabled = selectedElsewhere || linkedElsewhere || hasBudget;
+        checkbox.disabled = selectedElsewhere || linkedElsewhere;
         const label = document.createElement('label');
         label.htmlFor = checkbox.id;
         const dateLabel = new Date(item.date).toLocaleDateString('pt-PT');
@@ -479,13 +451,14 @@
   async function sendResponse() {
     if (!request || sendButton.disabled) return;
     shareStatus.textContent = '';
+    sendButton.disabled = true;
     const response = currentResponse();
     try {
-      const link = await buildShareLink('resposta', response);
-      responseLink.value = link;
-      responseLinkCard.classList.remove('hidden');
-      await shareOrCopyLink(link, 'Resposta Carteira', 'Segue a ligação com a classificação e/ou liquidação pedida.', responseLink, shareStatus);
+      await apiCall('submit', { token: taskToken, response });
+      workspace.classList.add('hidden');
+      document.getElementById('classifier-done').classList.remove('hidden');
     } catch (error) {
+      sendButton.disabled = false;
       shareStatus.textContent = error.message || 'Não foi possível criar a ligação de resposta.';
     }
   }
@@ -494,6 +467,7 @@
     request = value;
     ownerUpload.classList.add('hidden');
     responseWorkspace.classList.add('hidden');
+    document.getElementById('classifier-done').classList.add('hidden');
     budgetSelections = new Map();
     settlementSelections = new Map(value.incomes.map(income => [income.transactionId, new Set(income.previousExpenseIds)]));
     summary.textContent = `${value.expenses.length} despesas · ${value.incomes.length} receitas disponíveis para liquidação`;
@@ -507,28 +481,27 @@
     responseToDownload = value;
     ownerUpload.classList.add('hidden');
     workspace.classList.add('hidden');
+    document.getElementById('classifier-done').classList.add('hidden');
     responseSummary.textContent = value.assignments.length + ' classificações · ' + value.settlements.length + ' liquidações';
     responseWorkspace.classList.remove('hidden');
   }
 
-  async function loadLinkPayload() {
-    const hash = window.location.hash.slice(1);
-    const splitAt = hash.indexOf('=');
-    if (splitAt < 0) return;
-    const kind = hash.slice(0, splitAt);
-    if (kind !== 'pedido' && kind !== 'resposta') return;
+  async function loadTaskFromLink() {
+    const token = new URLSearchParams(window.location.hash.slice(1)).get('t');
+    if (!token) return;
+    taskToken = token;
     ownerUpload.classList.add('hidden');
+    status.textContent = 'A carregar o pedido…';
+    status.classList.remove('success');
     try {
-      const value = await decodePayload(hash.slice(splitAt + 1));
-      if (kind === 'pedido') {
-        validateRequest(value);
-        renderRequest(value);
-      } else {
-        validateResponse(value);
-        showResponse(value);
-      }
+      const result = await apiCall('load', { token });
+      validateRequest(result.request);
+      if (result.response) {
+        validateResponse(result.response);
+        showResponse(result.response);
+      } else renderRequest(result.request);
+      status.textContent = '';
     } catch (error) {
-      ownerUpload.classList.remove('hidden');
       status.textContent = error.message || 'Não foi possível abrir esta ligação.';
     }
   }
@@ -539,9 +512,6 @@
   document.getElementById('copy-request-link').addEventListener('click', () => {
     if (requestLink.value) copyLinkOnly(requestLink.value, requestLink, requestShareStatus);
   });
-  copyResponseLinkButton.addEventListener('click', () => {
-    if (responseLink.value) copyLinkOnly(responseLink.value, responseLink, shareStatus);
-  });
   downloadResponseButton.addEventListener('click', () => {
     if (!responseToDownload) return;
     const blob = new Blob([JSON.stringify(responseToDownload, null, 2)], { type: 'application/json' });
@@ -549,13 +519,18 @@
   });
 
   fileInput.addEventListener('change', async () => {
+    const cleanUrl = new URL(window.location.href);
+    cleanUrl.hash = '';
+    window.history.replaceState(null, '', cleanUrl.href);
     status.textContent = '';
     status.classList.remove('success');
     shareStatus.textContent = '';
     requestShareStatus.textContent = '';
     workspace.classList.add('hidden');
     responseWorkspace.classList.add('hidden');
+    document.getElementById('classifier-done').classList.add('hidden');
     request = null;
+    taskToken = null;
     ownerSummary.textContent = '';
     requestLinkCard.classList.add('hidden');
     requestLink.value = '';
@@ -571,19 +546,24 @@
       const parsed = JSON.parse(await file.text());
       validateRequest(parsed);
       ownerSummary.textContent = parsed.expenses.length + ' despesas · ' + parsed.incomes.length + ' receitas disponíveis para liquidação. Pedido válido.';
-      status.textContent = 'A criar a ligação…';
-      requestLink.value = await buildShareLink('pedido', parsed);
+      status.textContent = 'A guardar o pedido…';
+      const created = await apiCall('create', { request: parsed });
+      taskToken = created.token;
+      const link = new URL(window.location.href);
+      link.hash = 't=' + created.token;
+      window.history.replaceState(null, '', link.href);
+      requestLink.value = link.href;
       requestLinkCard.classList.remove('hidden');
       status.classList.add('success');
-      status.textContent = 'Ligação criada. Envia-a apenas a quem deve ver estes movimentos.';
+      status.textContent = 'Pedido guardado temporariamente. Envia a ligação apenas a quem deve ver estes movimentos.';
     } catch (error) {
       status.classList.remove('success');
-      status.textContent = error instanceof SyntaxError ? 'Não foi possível ler o ficheiro. Confirma que escolheste o pedido original.' : (error.message || 'Não foi possível abrir o pedido.');
+      status.textContent = error instanceof SyntaxError ? 'Não foi possível ler o ficheiro. Confirma que escolheste o pedido original.' : (error.message || 'Não foi possível guardar o pedido.');
     }
   });
 
   sendButton.addEventListener('click', sendResponse);
-  loadLinkPayload();
+  loadTaskFromLink();
 })();
 </script>
 </body>

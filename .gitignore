@@ -3,3 +3,7 @@
 local.properties
 *.apk
 *.aab
+**/.dev.vars
+**/.wrangler/
+**/node_modules/
+cloudflare/classification-api/.env
