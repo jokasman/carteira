@@ -852,6 +852,8 @@ class MainActivity : ComponentActivity() {
     var budgetFilter by remember{mutableStateOf("Todos")}
     var originFilter by remember{mutableStateOf("Todas")}
     var showInactive by remember{mutableStateOf(false)}
+    var pendingView by remember{mutableStateOf(false)}
+    var datesBeforePendingView by remember{mutableStateOf<Pair<Long?,Long?>?>(null)}
     val initialMonth=remember{currentMonthStart()}
     var dateFrom by remember{mutableStateOf<Long?>(initialMonth)}
     var dateTo by remember{mutableStateOf<Long?>(monthEndDay(initialMonth))}
@@ -859,15 +861,16 @@ class MainActivity : ComponentActivity() {
     var sort by remember{mutableStateOf("Mais recentes")}
     var sortExpanded by remember{mutableStateOf(false)}
     val filtered=tx.filter{transaction->
-        val typeMatches=kindFilter=="Todos"||transaction.kind==kindFilter
-        val budgetMatches=when(budgetFilter){
+        val pendingMatches=transaction.active&&(transaction.kind=="Receita"||(transaction.kind=="Despesa"&&transaction.budgetId==null&&transaction.settlementRevenueId==null))
+        val typeMatches=pendingView||kindFilter=="Todos"||transaction.kind==kindFilter
+        val budgetMatches=pendingView||when(budgetFilter){
             "Sem orçamento"->transaction.kind=="Despesa"&&transaction.budgetId==null
             "Com orçamento"->transaction.kind=="Despesa"&&transaction.budgetId!=null
             else->true
         }
         val isCsv=transaction.importedFromCsv||transaction.importKey!=null
         val originMatches=when(originFilter){"CSV"->isCsv;"Manual"->!isCsv;else->true}
-        val activeMatches=showInactive||transaction.active
+        val activeMatches=if(pendingView)pendingMatches else showInactive||transaction.active
         val dateMatches=(dateFrom==null||transaction.date>=dateFrom!!) && (dateTo==null||transaction.date<=endOfDay(dateTo!!))
         typeMatches&&budgetMatches&&originMatches&&activeMatches&&dateMatches
     }.let{list->when(sort){
@@ -922,12 +925,30 @@ class MainActivity : ComponentActivity() {
             TextButton(onClick=importClassificationResponse,contentPadding=PaddingValues(horizontal=5.dp,vertical=2.dp)){Icon(Icons.Default.AssignmentTurnedIn,null,tint=Green,modifier=Modifier.size(17.dp));Spacer(Modifier.width(3.dp));Text("Resposta",color=Green)}
         }
         Row(horizontalArrangement=Arrangement.spacedBy(6.dp),modifier=Modifier.horizontalScroll(rememberScrollState()).padding(bottom=2.dp)){
-            listOf("Todos","Despesa","Receita","Transferência","Ajuste").forEach{option->AssistChip(onClick={kindFilter=option},label={Text(option)},colors=AssistChipDefaults.assistChipColors(containerColor=if(kindFilter==option)Mint else Color.White))}
-            listOf("Todos os orçamentos","Com orçamento","Sem orçamento").forEach{label->
-                val value=if(label=="Todos os orçamentos")"Todos" else label
-                AssistChip(onClick={budgetFilter=value},label={Text(label)},colors=AssistChipDefaults.assistChipColors(containerColor=if(budgetFilter==value)Mint else Color.White))
+            FilterChip(
+                selected=pendingView,
+                onClick={
+                    if(pendingView){
+                        pendingView=false
+                        datesBeforePendingView?.let{(from,to)->dateFrom=from;dateTo=to}
+                        datesBeforePendingView=null
+                    } else {
+                        datesBeforePendingView=dateFrom to dateTo
+                        dateFrom=null;dateTo=null
+                        pendingView=true
+                    }
+                },
+                label={Text("Receitas ativas e despesas sem orçamento")},
+                colors=FilterChipDefaults.filterChipColors(selectedContainerColor=Mint)
+            )
+            if(!pendingView) listOf("Todos","Despesa","Receita","Transferência","Ajuste").forEach{option->AssistChip(onClick={kindFilter=option},label={Text(option)},colors=AssistChipDefaults.assistChipColors(containerColor=if(kindFilter==option)Mint else Color.White))}
+            if(!pendingView){
+                listOf("Todos os orçamentos","Com orçamento","Sem orçamento").forEach{label->
+                    val value=if(label=="Todos os orçamentos")"Todos" else label
+                    AssistChip(onClick={budgetFilter=value},label={Text(label)},colors=AssistChipDefaults.assistChipColors(containerColor=if(budgetFilter==value)Mint else Color.White))
+                }
+                AssistChip(onClick={showInactive=!showInactive},label={Text(if(showInactive)"Inativos visíveis" else "Inativos ocultos")},colors=AssistChipDefaults.assistChipColors(containerColor=if(showInactive)Mint else Color.White))
             }
-            AssistChip(onClick={showInactive=!showInactive},label={Text(if(showInactive)"Inativos visíveis" else "Inativos ocultos")},colors=AssistChipDefaults.assistChipColors(containerColor=if(showInactive)Mint else Color.White))
             listOf("Todas" to "Todas as origens","CSV" to "CSV","Manual" to "Manual").forEach{(value,label)->
                 AssistChip(onClick={originFilter=value},label={Text(label)},colors=AssistChipDefaults.assistChipColors(containerColor=if(originFilter==value)Mint else Color.White))
             }
