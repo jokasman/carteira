@@ -41,6 +41,7 @@ Atualizado em 8 de novembro de 2026.
 ## Decisões e verificação
 
 - A importação bancária continua a usar CSV. O utilizador cancelou Enable Banking/Firebase e pediu para reverter essa integração; não retomar backend local nem cloud sem um pedido explícito.
+- Uma despesa pode ser guardada sem orçamento, editada e dividida sem associação obrigatória. Orçamentos continuam opcionais e podem ser associados depois.
 - A app permanece nativa Android, com dados locais e sem sincronização de contas. O utilizador continua a carregar o pedido e a descarregar a resposta JSON; não é necessária nova versão Android.
 - O Worker e a D1 estão publicados na conta Cloudflare reclamada. A página está disponível em `https://carteira-classificacao.faint-foxtail.workers.dev/classificacao/`; a migração D1 está aplicada e o percurso criar pedido → classificar → descarregar resposta foi confirmado com dados sintéticos.
 - O Wrangler local não está autenticado na conta Cloudflare permanente; o Worker ativo continua acessível e futuras alterações ao backend exigirão `wrangler login` ou um API Token limitado à conta.

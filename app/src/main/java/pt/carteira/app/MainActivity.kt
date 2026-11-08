@@ -106,17 +106,16 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
             val candidate=if(matchedBudget!=null&&budgetVisibleInMonth(matchedBudget,currentMonthStart(value.date))) value.copy(budgetId=matchedBudget.id) else value
             val budget = candidate.budgetId?.let { dao.budgetById(it) }
             val validBudget = when (candidate.kind) {
-                "Despesa" -> budget != null
+                "Despesa" -> candidate.budgetId == null || budget != null
                 else -> candidate.budgetId == null
             }
             val validDestination = candidate.kind != "Transferência" ||
                 (candidate.toAccountId != null && candidate.toAccountId != source.id && dao.accountById(candidate.toAccountId) != null)
             val validAmount=candidate.amount.isFinite() && (if(candidate.kind=="Ajuste") kotlin.math.abs(candidate.amount)>=0.01 else candidate.amount>=0.01)
-            val importedWithoutBudget=candidate.kind=="Despesa"&&candidate.budgetId==null&&(candidate.importedFromCsv||candidate.importKey!=null)
             if (settlementLocked || candidate.kind !in listOf("Despesa", "Receita", "Transferência", "Ajuste") ||
                 !validAmount ||
                 candidate.category.isBlank() || !dao.categoryExists(candidate.category, candidate.kind) ||
-                (!validBudget&&!importedWithoutBudget) || !validDestination) false
+                !validBudget || !validDestination) false
             else {
                 val normalized = candidate.copy(
                     title = candidate.title.trim(),
@@ -365,7 +364,7 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
             fun rounded(value:Double)=BigDecimal.valueOf(value).setScale(2,RoundingMode.HALF_UP).toDouble()
             val first=rounded(firstAmount);val second=rounded(secondAmount);val total=rounded(kotlin.math.abs(original.amount))
             suspend fun validBudget(id:Long?):Boolean {
-                if(id==null)return original.importedFromCsv||original.importKey!=null
+                if(id==null)return true
                 val budget=dao.budgetById(id)?:return false
                 return budget.id==original.budgetId||budgetVisibleInMonth(budget,currentMonthStart(original.date))
             }
@@ -1220,7 +1219,6 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
     var accountMenu by remember{mutableStateOf(false)}; var destinationMenu by remember{mutableStateOf(false)}
     var budgetMenu by remember{mutableStateOf(false)}
     var error by remember{mutableStateOf("")}; var saving by remember{mutableStateOf(false)}
-    val allowImportedNoBudget=initial!=null&&(initial.importedFromCsv||initial.importKey!=null)&&initial.budgetId==null
     val availableBudgets=budgets.filter{budgetVisibleInMonth(it,currentMonthStart(initial?.date?:System.currentTimeMillis()))||it.id==initial?.budgetId}
     val selectedBudget=pinnedBudget?:availableBudgets.firstOrNull{it.id==budgetId}
     val movementKinds=if(initial?.kind=="Ajuste") listOf("Despesa","Receita","Transferência","Ajuste") else listOf("Despesa","Receita","Transferência")
@@ -1273,14 +1271,17 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
 
             if(kind=="Despesa"){
                 if(pinnedBudget!=null) OutlinedTextField(pinnedBudget.name,{},readOnly=true,label={Text("Orçamento")},supportingText={Text("Movimento associado a este orçamento.")},modifier=Modifier.fillMaxWidth())
-                else if(availableBudgets.isEmpty()) Column {
-                    Text(if(allowImportedNoBudget)"Este movimento importado pode continuar sem orçamento." else "É obrigatório associar cada despesa a um orçamento.",color=Muted,style=MaterialTheme.typography.bodySmall)
-                    if(!allowImportedNoBudget) TextButton(onClick=createBudget){Text("Criar orçamento mensal",color=Green)}
-                } else ExposedDropdownMenuBox(expanded=budgetMenu,onExpandedChange={budgetMenu=!budgetMenu}){
-                    OutlinedTextField(selectedBudget?.name?:if(allowImportedNoBudget)"Sem orçamento" else "",{},readOnly=true,label={Text(if(allowImportedNoBudget)"Orçamento" else "Orçamento obrigatório")},placeholder={Text("Selecionar orçamento")},modifier=Modifier.menuAnchor().fillMaxWidth(),trailingIcon={ExposedDropdownMenuDefaults.TrailingIcon(expanded=budgetMenu)})
-                    ExposedDropdownMenu(expanded=budgetMenu,onDismissRequest={budgetMenu=false}){
-                        if(allowImportedNoBudget) DropdownMenuItem(text={Text("Sem orçamento")},onClick={budgetId=0L;manuallySelectedBudget=true;budgetMenu=false})
-                        availableBudgets.forEach{item->DropdownMenuItem(text={Text(item.name)},onClick={budgetId=item.id;manuallySelectedBudget=true;budgetMenu=false})}
+                else {
+                    Column {
+                        Text("Associar um orçamento é opcional.",color=Muted,style=MaterialTheme.typography.bodySmall)
+                        if(availableBudgets.isEmpty()) TextButton(onClick=createBudget){Text("Criar orçamento mensal",color=Green)}
+                    }
+                    ExposedDropdownMenuBox(expanded=budgetMenu,onExpandedChange={budgetMenu=!budgetMenu}){
+                        OutlinedTextField(selectedBudget?.name?:"Sem orçamento",{},readOnly=true,label={Text("Orçamento (opcional)")},placeholder={Text("Selecionar orçamento")},modifier=Modifier.menuAnchor().fillMaxWidth(),trailingIcon={ExposedDropdownMenuDefaults.TrailingIcon(expanded=budgetMenu)})
+                        ExposedDropdownMenu(expanded=budgetMenu,onDismissRequest={budgetMenu=false}){
+                            DropdownMenuItem(text={Text("Sem orçamento")},onClick={budgetId=0L;manuallySelectedBudget=true;budgetMenu=false})
+                            availableBudgets.forEach{item->DropdownMenuItem(text={Text(item.name)},onClick={budgetId=item.id;manuallySelectedBudget=true;budgetMenu=false})}
+                        }
                     }
                 }
                 if(selectedBudget!=null&&normalizeMovementKey(title).isNotBlank()) Row(verticalAlignment=Alignment.CenterVertically){Checkbox(rememberBudgetRule,{rememberBudgetRule=it});Text("Usar este orçamento em movimentos futuros com o mesmo descritivo",color=Muted,style=MaterialTheme.typography.bodySmall)}
@@ -1302,7 +1303,6 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
             val parsedAmount=amount.replace(',','.').toDoubleOrNull()
             when {
                 parsedAmount==null||!parsedAmount.isFinite()||parsedAmount<0.01 -> error="Indica um montante válido, mínimo de 0,01 €."
-                kind=="Despesa"&&selectedBudget==null&&!allowImportedNoBudget -> error="Seleciona ou cria um orçamento para esta despesa."
                 kind=="Transferência"&&accounts.none{it.id==destinationId&&it.id!=accountId} -> error="Cria ou escolhe uma conta de destino diferente."
                 else -> {
                     error=""; saving=true
@@ -1313,7 +1313,7 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
                         recurring=recurring,note=note,toAccountId=if(kind=="Transferência")destinationId else null,
                         budgetId=if(kind=="Despesa")selectedBudget?.id else null
                     )
-                    save(value,rememberBudgetRule){success->saving=false;if(success)close() else error="Não foi possível guardar. Confirma o orçamento, o montante e as contas."
+                    save(value,rememberBudgetRule){success->saving=false;if(success)close() else error="Não foi possível guardar. Confirma o montante, o orçamento selecionado e as contas."
                     }
                 }
             }
@@ -1344,18 +1344,18 @@ private fun defaultMovementCategory(kind:String):String=when(kind){
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun SplitBudgetSelector(
-    label:String,budgets:List<Budget>,selectedId:Long?,allowNoBudget:Boolean,onSelect:(Long?)->Unit
+    label:String,budgets:List<Budget>,selectedId:Long?,onSelect:(Long?)->Unit
 ){
     var expanded by remember(label){mutableStateOf(false)}
     val selected=budgets.firstOrNull{it.id==selectedId}
     ExposedDropdownMenuBox(expanded=expanded,onExpandedChange={expanded=!expanded}){
         OutlinedTextField(
-            value=selected?.name?:if(allowNoBudget)"Sem orçamento" else "",
+            value=selected?.name?:"Sem orçamento",
             onValueChange={},readOnly=true,label={Text(label)},placeholder={Text("Selecionar orçamento")},
             modifier=Modifier.menuAnchor().fillMaxWidth(),trailingIcon={ExposedDropdownMenuDefaults.TrailingIcon(expanded=expanded)}
         )
         ExposedDropdownMenu(expanded=expanded,onDismissRequest={expanded=false}){
-            if(allowNoBudget) DropdownMenuItem(text={Text("Sem orçamento")},onClick={onSelect(null);expanded=false})
+            DropdownMenuItem(text={Text("Sem orçamento")},onClick={onSelect(null);expanded=false})
             budgets.forEach{budget->DropdownMenuItem(text={Text(budget.name)},onClick={onSelect(budget.id);expanded=false})}
         }
     }
@@ -1391,10 +1391,10 @@ private fun defaultMovementCategory(kind:String):String=when(kind){
             Text("O total das duas partes tem de ser igual a ${money(total.toDouble())}.",color=Muted)
             OutlinedTextField(firstTitle,{firstTitle=it},label={Text("Descrição da parte 1")},singleLine=true,modifier=Modifier.fillMaxWidth())
             OutlinedTextField(firstAmount,{value->firstAmount=value;secondAmount=calculatedRemainder(value)},label={Text("Montante da parte 1 (€)")},singleLine=true,keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Decimal),modifier=Modifier.fillMaxWidth())
-            if(original.kind=="Despesa") SplitBudgetSelector("Orçamento da parte 1",availableBudgets,firstBudgetId,original.importedFromCsv||original.importKey!=null){firstBudgetId=it}
+            if(original.kind=="Despesa") SplitBudgetSelector("Orçamento da parte 1 (opcional)",availableBudgets,firstBudgetId){firstBudgetId=it}
             OutlinedTextField(secondTitle,{secondTitle=it},label={Text("Descrição da parte 2")},singleLine=true,modifier=Modifier.fillMaxWidth())
             OutlinedTextField(secondAmount,{secondAmount=it},label={Text("Montante da parte 2 (€)")},singleLine=true,keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Decimal),modifier=Modifier.fillMaxWidth())
-            if(original.kind=="Despesa") SplitBudgetSelector("Orçamento da parte 2",availableBudgets,secondBudgetId,original.importedFromCsv||original.importKey!=null){secondBudgetId=it}
+            if(original.kind=="Despesa") SplitBudgetSelector("Orçamento da parte 2 (opcional)",availableBudgets,secondBudgetId){secondBudgetId=it}
             if(error.isNotBlank()) Text(error,color=Coral,style=MaterialTheme.typography.bodySmall)
         }},
         confirmButton={TextButton(enabled=!saving&&totalCents>=2,onClick={
@@ -1403,9 +1403,7 @@ private fun defaultMovementCategory(kind:String):String=when(kind){
             when{
                 first==null||second==null||first< BigDecimal("0.01")||second<BigDecimal("0.01")->error="Indica dois montantes válidos, cada um de pelo menos 0,01 €."
                 first.add(second).compareTo(total)!=0->error="A soma das partes tem de ser igual a ${money(total.toDouble())}."
-                original.kind=="Despesa"&&firstBudgetId==null&&!original.importedFromCsv&&original.importKey==null->error="Seleciona um orçamento para a primeira parte."
-                original.kind=="Despesa"&&secondBudgetId==null&&!original.importedFromCsv&&original.importKey==null->error="Seleciona um orçamento para a segunda parte."
-                else->{error="";saving=true;save(first.toDouble(),second.toDouble(),firstTitle,secondTitle,firstBudgetId,secondBudgetId){success->saving=false;if(success)close() else error="Não foi possível dividir o movimento. Confirma os valores e os orçamentos."}}
+                else->{error="";saving=true;save(first.toDouble(),second.toDouble(),firstTitle,secondTitle,firstBudgetId,secondBudgetId){success->saving=false;if(success)close() else error="Não foi possível dividir o movimento. Confirma os valores e os orçamentos selecionados."}}
             }
         }){Text(if(saving)"A dividir…" else "Dividir",color=Green,fontWeight=FontWeight.Bold)}},
         dismissButton={TextButton(onClick=close,enabled=!saving){Text("Cancelar",color=Muted)} }

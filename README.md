@@ -7,7 +7,7 @@ Aplicação nativa Android de finanças pessoais, construída com Kotlin, Jetpac
 - Painel com saldo, receitas, despesas, contas e movimentos recentes.
 - Registo de despesas, receitas e transferências, com conta, nota e recorrência.
 - Gestão de várias contas e carteiras.
-- Orçamentos mensais, histórico de limites e associação rápida de movimentos.
+- Orçamentos mensais e histórico de limites; despesas podem ficar sem orçamento e ser associadas depois.
 - Relatórios, filtros e ordenação de movimentos.
 - Importação de extratos CSV, deteção de duplicados e regras para associar orçamentos.
 - Envio de movimentos selecionados para classificação e liquidação por outra pessoa.
