@@ -11,7 +11,18 @@ Aplicação nativa Android de finanças pessoais, construída com Kotlin, Jetpac
 - Detalhe de cada orçamento com os movimentos do mês e criação de movimentos já associados ao orçamento.
 - Relatórios de receitas, despesas e distribuição por categoria.
 - Filtro por tipo de movimento e remoção de movimentos por toque prolongado.
+- Envio de movimentos selecionados para atribuição de orçamentos e liquidação de receitas num formulário web.
 - Interface em português e valores formatados em euros.
+
+## Classificar movimentos com outra pessoa
+
+Na secção **Movimentos**, mantém premidos os movimentos pretendidos e toca no ícone de partilha. O pedido contém apenas movimentos selecionados que sejam elegíveis para classificação ou liquidação. Para cada despesa, inclui só os orçamentos disponíveis no mês respetivo. Para rever uma liquidação existente, seleciona a receita e todas as despesas já associadas.
+
+A outra pessoa abre `https://jokasman.github.io/carteira/classificacao/`, seleciona o pedido e atribui orçamentos e/ou liquida receitas. Uma liquidação só é aceite quando as despesas somam exatamente o valor da receita, conforme as regras da app. Em Android, **Enviar resposta** abre a partilha do sistema para escolher WhatsApp; noutros browsers, descarrega a resposta JSON. Na Carteira, toca em **Resposta**, escolhe o ficheiro e confirma as alterações apresentadas.
+
+A página é estática: lê no browser apenas o ficheiro enviado e não consulta nem recebe outros movimentos. A resposta contém apenas o identificador do pedido e as escolhas. A app guarda localmente os pedidos pendentes por até 30 dias, exclui-os das cópias de segurança Android e valida novamente cada movimento, orçamento e liquidação antes de importar.
+
+Para publicar a página, configura GitHub Pages no repositório: **Settings → Pages → Deploy from a branch → `main` → `/docs`**. O ficheiro da página está em `docs/classificacao/index.html`.
 
 ## Abrir e executar
 
@@ -23,4 +34,4 @@ Com a assinatura permanente configurada, descarrega o artifact `Carteira-APK` na
 
 ## Limites desta versão
 
-Os dados permanecem no dispositivo. Sincronização bancária, conta online, partilha entre pessoas e exportação/importação requerem serviços e fluxos adicionais.
+Os dados dos movimentos permanecem no dispositivo. A classificação por outra pessoa usa ficheiros locais de pedido e resposta, sem sincronização de contas ou acesso da outra pessoa à base de dados.

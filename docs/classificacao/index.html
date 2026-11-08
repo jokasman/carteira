@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="pt-PT">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="color-scheme" content="light">
+  <title>Classificar e liquidar · Carteira</title>
+  <style>
+    :root{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color:#18352d;background:#f7f8f5;font-synthesis:none;text-rendering:optimizeLegibility}
+    *{box-sizing:border-box}
+    body{margin:0;padding:24px 14px 48px}
+    main{max-width:760px;margin:0 auto}
+    header{margin:4px 0 20px}
+    .brand{font-size:.76rem;letter-spacing:.12em;font-weight:800;color:#3d8a68}
+    h1{font-size:1.65rem;margin:.35rem 0 .5rem}
+    h2{font-size:1.05rem;margin:0 0 7px}
+    p{line-height:1.5;color:#58665f}
+    .card{background:#fff;border:1px solid #e1e8e2;border-radius:18px;padding:18px;margin:14px 0;box-shadow:0 5px 18px #18352d0a}
+    .privacy{background:#e9f3ec;border:0}
+    label{display:block;font-weight:700;margin-bottom:8px}
+    input[type=file]{display:block;width:100%;padding:12px;border:1px solid #cdd8d0;border-radius:12px;background:#fff;color:#18352d}
+    .movement-title{font-size:1rem;font-weight:750;margin:0 0 5px;overflow-wrap:anywhere}
+    .movement-meta{font-size:.92rem;color:#68756e;margin:0 0 14px}
+    select{width:100%;min-height:48px;padding:10px 12px;border:1px solid #bfcfc3;border-radius:12px;background:#fff;color:#18352d;font:inherit}
+    select:disabled{background:#f0f2ef;color:#78827d}
+    button{width:100%;min-height:50px;border:0;border-radius:13px;background:#3d8a68;color:#fff;font:inherit;font-weight:750;padding:12px 16px;margin-top:10px}
+    button:disabled{background:#aebbb2;color:#f8faf8}
+    .hint{font-size:.88rem;color:#68756e}
+    .status{min-height:1.4em;color:#a34137;font-weight:650}
+    .count{font-weight:750;color:#18352d}
+    .exact{color:#28714f;font-weight:750}
+    .not-exact{color:#a34137;font-weight:750}
+    .settlement-row{display:flex;gap:12px;align-items:flex-start;padding:11px 0;border-top:1px solid #edf0ed}
+    .settlement-row input{width:22px;height:22px;flex:none;margin:1px 0 0;accent-color:#3d8a68}
+    .settlement-row label{font-weight:500;margin:0;flex:1;line-height:1.35}
+    .small{font-size:.82rem;color:#78827d}
+    .hidden{display:none!important}
+    footer{font-size:.82rem;color:#78827d;text-align:center;margin-top:22px}
+    @media(min-width:560px){body{padding-top:38px}.card{padding:22px}.movement{display:grid;grid-template-columns:1fr 270px;gap:8px 22px;align-items:center}.movement .movement-meta{margin-bottom:0}.movement label{grid-column:2;grid-row:1}.movement select{grid-column:2;grid-row:2}.movement .info{grid-column:1;grid-row:1 / span 2}.movement .no-budget{grid-column:2;grid-row:1 / span 2}}
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="brand">CARTEIRA</div>
+    <h1>Classificar e liquidar</h1>
+    <p>Abre o pedido recebido, atribui orçamentos às despesas e, se quiseres, liquida receitas selecionando as despesas correspondentes.</p>
+  </header>
+
+  <section class="card privacy" aria-label="Privacidade">
+    <strong>Privacidade</strong>
+    <p style="margin-bottom:0">Só aparecem os movimentos incluídos no pedido. O ficheiro é tratado neste navegador e não é enviado para o site. A resposta contém apenas as escolhas.</p>
+  </section>
+
+  <section class="card">
+    <label for="request-file">1. Abrir pedido da Carteira</label>
+    <input id="request-file" type="file" accept=".json,application/json">
+    <p class="hint">Seleciona o ficheiro recebido. Não edites o ficheiro.</p>
+    <p id="status" class="status" role="alert" aria-live="polite"></p>
+  </section>
+
+  <section id="workspace" class="hidden" aria-live="polite">
+    <div class="card">
+      <div id="request-summary" class="count"></div>
+      <p class="hint">Para cada despesa, só aparecem os orçamentos disponíveis indicados no pedido. As liquidações têm de igualar exatamente a receita.</p>
+    </div>
+    <h2>Despesas</h2>
+    <div id="expense-list"></div>
+    <div id="settlement-section" class="hidden">
+      <h2>Liquidações</h2>
+      <p class="hint">Seleciona despesas até o total ficar exatamente igual ao valor da receita. Uma despesa só pode pertencer a uma liquidação.</p>
+      <div id="settlement-list"></div>
+    </div>
+    <div class="card">
+      <div id="completion" class="hint">Escolhe pelo menos um orçamento ou uma liquidação válida.</div>
+      <button id="send-response" type="button" disabled>Enviar resposta</button>
+      <p id="share-status" class="hint">No Android, o botão abre a partilha para escolher WhatsApp ou outra app.</p>
+    </div>
+  </section>
+  <footer>Carteira · classificação de movimentos</footer>
+</main>
+
+<script>
+(() => {
+  'use strict';
+  const REQUEST_SCHEMA = 'pt.carteira.classification-request';
+  const RESPONSE_SCHEMA = 'pt.carteira.classification-response';
+  const VERSION = 2;
+  const fileInput = document.getElementById('request-file');
+  const status = document.getElementById('status');
+  const workspace = document.getElementById('workspace');
+  const expenseList = document.getElementById('expense-list');
+  const settlementSection = document.getElementById('settlement-section');
+  const settlementList = document.getElementById('settlement-list');
+  const summary = document.getElementById('request-summary');
+  const completion = document.getElementById('completion');
+  const sendButton = document.getElementById('send-response');
+  const shareStatus = document.getElementById('share-status');
+  let request = null;
+  let budgetSelections = new Map();
+  let settlementSelections = new Map();
+
+  function validId(value) {
+    return Number.isSafeInteger(value) && value > 0;
+  }
+
+  function validateRequest(value) {
+    if (!value || value.schema !== REQUEST_SCHEMA || value.version !== VERSION) throw new Error('Este ficheiro não é um pedido Carteira compatível.');
+    if (typeof value.requestId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.requestId)) throw new Error('O identificador do pedido é inválido.');
+    if (!Array.isArray(value.expenses) || value.expenses.length < 1 || value.expenses.length > 500 || !Array.isArray(value.incomes) || value.expenses.length + value.incomes.length > 500) throw new Error('O pedido não contém movimentos válidos.');
+    const movementIds = new Set();
+    for (const item of value.expenses) {
+      if (!validId(item.transactionId) || movementIds.has(item.transactionId)) throw new Error('O pedido contém um movimento inválido ou repetido.');
+      movementIds.add(item.transactionId);
+      if (typeof item.displayTitle !== 'string' || !item.displayTitle.trim() || !Number.isFinite(item.date) || !Number.isFinite(item.amount) || item.amount < 0.01 || typeof item.active !== 'boolean') throw new Error('O pedido contém dados de despesa inválidos.');
+      if (item.settlementIncomeId !== null && !validId(item.settlementIncomeId)) throw new Error('O pedido contém uma liquidação inválida.');
+      if (item.settlementIncomeId === null && !item.active) throw new Error('O estado de uma despesa é inválido.');
+      if (item.settlementIncomeId !== null && (item.active || item.budgets?.length)) throw new Error('O estado de uma despesa liquidada é inválido.');
+      if (!Array.isArray(item.budgets) || item.budgets.length > 100) throw new Error('As opções de orçamento são inválidas.');
+      const budgetIds = new Set();
+      for (const budget of item.budgets) {
+        if (!validId(budget.id) || budgetIds.has(budget.id) || typeof budget.name !== 'string' || !budget.name.trim()) throw new Error('O pedido contém opções de orçamento inválidas.');
+        budgetIds.add(budget.id);
+      }
+    }
+    for (const income of value.incomes) {
+      if (!validId(income.transactionId) || movementIds.has(income.transactionId)) throw new Error('O pedido contém uma receita inválida ou repetida.');
+      movementIds.add(income.transactionId);
+      if (typeof income.displayTitle !== 'string' || !income.displayTitle.trim() || !Number.isFinite(income.date) || !Number.isFinite(income.amount) || income.amount < 0.01 || typeof income.active !== 'boolean') throw new Error('O pedido contém dados de receita inválidos.');
+      if (!Array.isArray(income.previousExpenseIds) || income.previousExpenseIds.some(id => !validId(id)) || new Set(income.previousExpenseIds).size !== income.previousExpenseIds.length) throw new Error('O pedido contém despesas previamente liquidadas inválidas.');
+      if (income.active !== (income.previousExpenseIds.length === 0)) throw new Error('O estado de uma receita é inválido.');
+    }
+    const incomeById = new Map(value.incomes.map(income => [income.transactionId, income]));
+    for (const expense of value.expenses) {
+      if (expense.settlementIncomeId !== null) {
+        const income = incomeById.get(expense.settlementIncomeId);
+        if (!income || !income.previousExpenseIds.includes(expense.transactionId)) throw new Error('A associação de uma despesa liquidada é inválida.');
+      }
+    }
+    for (const income of value.incomes) {
+      const linked = value.expenses.filter(expense => expense.settlementIncomeId === income.transactionId).map(expense => expense.transactionId);
+      if (linked.length !== income.previousExpenseIds.length || linked.some(id => !income.previousExpenseIds.includes(id))) throw new Error('As despesas liquidadas não correspondem à receita do pedido.');
+    }
+  }
+
+  function money(value) {
+    return new Intl.NumberFormat('pt-PT', { style: 'currency', currency: 'EUR' }).format(value);
+  }
+
+  function expenseItem(id) {
+    return request.expenses.find(item => item.transactionId === id);
+  }
+
+  function selectedByOtherIncome(expenseId, incomeId) {
+    for (const [otherId, selected] of settlementSelections) {
+      if (otherId !== incomeId && selected.has(expenseId)) return true;
+    }
+    return false;
+  }
+
+  function selectedInAnySettlement(expenseId) {
+    for (const selected of settlementSelections.values()) if (selected.has(expenseId)) return true;
+    return false;
+  }
+
+  function settlementTotal(incomeId) {
+    const selected = settlementSelections.get(incomeId) || new Set();
+    return [...selected].reduce((sum, id) => {
+      const item = expenseItem(id);
+      return sum + (item ? Math.round(item.amount * 100) : 0);
+    }, 0);
+  }
+
+  function renderExpenses() {
+    expenseList.replaceChildren();
+    request.expenses.forEach((item, index) => {
+      const card = document.createElement('article');
+      card.className = 'card movement';
+      const info = document.createElement('div');
+      info.className = 'info';
+      const title = document.createElement('h3');
+      title.className = 'movement-title';
+      title.textContent = item.displayTitle;
+      const meta = document.createElement('p');
+      meta.className = 'movement-meta';
+      const date = new Date(item.date);
+      if (!Number.isFinite(date.getTime())) throw new Error('O pedido contém uma data inválida.');
+      meta.textContent = `${date.toLocaleDateString('pt-PT')} · −${money(item.amount)}`;
+      info.append(title, meta);
+      card.append(info);
+
+      if (item.budgets.length > 0) {
+        const label = document.createElement('label');
+        label.htmlFor = `budget-${index}`;
+        label.textContent = 'Orçamento disponível';
+        const select = document.createElement('select');
+        select.id = `budget-${index}`;
+        select.disabled = selectedInAnySettlement(item.transactionId);
+        const none = document.createElement('option');
+        none.value = '';
+        none.textContent = 'Não atribuir por agora';
+        select.append(none);
+        item.budgets.forEach(budget => {
+          const option = document.createElement('option');
+          option.value = String(budget.id);
+          option.textContent = budget.name;
+          select.append(option);
+        });
+        select.addEventListener('change', () => {
+          if (select.value) budgetSelections.set(item.transactionId, Number(select.value));
+          else budgetSelections.delete(item.transactionId);
+          renderSettlementList();
+          updateCompletion();
+        });
+        card.append(label, select);
+      } else {
+        const note = document.createElement('div');
+        note.className = 'hint no-budget';
+        const linkedIncome = item.settlementIncomeId === null ? null : request.incomes.find(income => income.transactionId === item.settlementIncomeId);
+        note.textContent = linkedIncome ? `Já liquidada com ${linkedIncome.displayTitle}.` : 'Sem orçamento disponível; pode ser usada numa liquidação.';
+        card.append(note);
+      }
+      expenseList.append(card);
+    });
+  }
+
+  function renderSettlementList() {
+    settlementList.replaceChildren();
+    if (!request.incomes.length) {
+      settlementSection.classList.add('hidden');
+      return;
+    }
+    settlementSection.classList.remove('hidden');
+    request.incomes.forEach(income => {
+      const card = document.createElement('article');
+      card.className = 'card';
+      const title = document.createElement('h3');
+      title.className = 'movement-title';
+      title.textContent = `Liquidar ${income.displayTitle}`;
+      const date = new Date(income.date);
+      const meta = document.createElement('p');
+      meta.className = 'movement-meta';
+      meta.textContent = `${date.toLocaleDateString('pt-PT')} · receita ${money(income.amount)}`;
+      card.append(title, meta);
+      const selected = settlementSelections.get(income.transactionId) || new Set();
+      request.expenses.forEach(item => {
+        const row = document.createElement('div');
+        row.className = 'settlement-row';
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.id = `settle-${income.transactionId}-${item.transactionId}`;
+        checkbox.checked = selected.has(item.transactionId);
+        const selectedElsewhere = selectedByOtherIncome(item.transactionId, income.transactionId);
+        const linkedElsewhere = item.settlementIncomeId !== null && item.settlementIncomeId !== income.transactionId;
+        const hasBudget = budgetSelections.has(item.transactionId);
+        checkbox.disabled = selectedElsewhere || linkedElsewhere || hasBudget;
+        const label = document.createElement('label');
+        label.htmlFor = checkbox.id;
+        const dateLabel = new Date(item.date).toLocaleDateString('pt-PT');
+        label.textContent = `${item.displayTitle} · ${dateLabel} · ${money(item.amount)}${item.settlementIncomeId === income.transactionId ? ' · atualmente liquidada aqui' : ''}`;
+        checkbox.addEventListener('change', () => {
+          const next = new Set(settlementSelections.get(income.transactionId) || []);
+          if (checkbox.checked) next.add(item.transactionId);
+          else next.delete(item.transactionId);
+          settlementSelections.set(income.transactionId, next);
+          renderExpenses();
+          renderSettlementList();
+          updateCompletion();
+        });
+        row.append(checkbox, label);
+        card.append(row);
+      });
+      const total = settlementTotal(income.transactionId);
+      const target = Math.round(income.amount * 100);
+      const amountLine = document.createElement('p');
+      amountLine.className = total === target ? 'exact' : 'not-exact';
+      amountLine.textContent = `Selecionado: ${money(total / 100)} / ${money(income.amount)}${total === target ? ' · valor exato' : ''}`;
+      card.append(amountLine);
+      settlementList.append(card);
+    });
+  }
+
+  function currentResponse() {
+    const assignments = [...budgetSelections.entries()].map(([transactionId, budgetId]) => ({ transactionId, budgetId }));
+    const settlements = request.incomes.map(income => ({
+      incomeId: income.transactionId,
+      expenseIds: [...(settlementSelections.get(income.transactionId) || new Set())]
+    })).filter(settlement => settlement.expenseIds.length > 0);
+    return { schema: RESPONSE_SCHEMA, version: VERSION, requestId: request.requestId, assignments, settlements };
+  }
+
+  function updateCompletion() {
+    if (!request) return;
+    let invalidSettlement = false;
+    for (const income of request.incomes) {
+      const selected = settlementSelections.get(income.transactionId) || new Set();
+      if (selected.size > 0 && settlementTotal(income.transactionId) !== Math.round(income.amount * 100)) invalidSettlement = true;
+    }
+    const response = currentResponse();
+    const hasAction = response.assignments.length > 0 || response.settlements.length > 0;
+    sendButton.disabled = invalidSettlement || !hasAction;
+    if (invalidSettlement) completion.textContent = 'Ajusta cada liquidação até o total ficar exatamente igual à receita.';
+    else if (!hasAction) completion.textContent = 'Escolhe pelo menos um orçamento ou uma liquidação válida.';
+    else completion.textContent = `${response.assignments.length} despesas com orçamento · ${response.settlements.length} liquidações válidas.`;
+  }
+
+  function downloadFallback(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  async function sendResponse() {
+    if (!request || sendButton.disabled) return;
+    shareStatus.textContent = '';
+    const response = currentResponse();
+    const blob = new Blob([JSON.stringify(response, null, 2)], { type: 'application/json' });
+    const filename = `carteira-resposta-${request.requestId.slice(0, 8)}.json`;
+    try {
+      const file = new File([blob], filename, { type: 'application/json' });
+      if (typeof navigator.share === 'function' && typeof navigator.canShare === 'function' && navigator.canShare({ files: [file] })) {
+        await navigator.share({ title: 'Resposta Carteira', text: 'Segue a classificação e/ou liquidação pedida.', files: [file] });
+        shareStatus.textContent = 'Partilha aberta. Se escolheste WhatsApp, confirma o envio da resposta.';
+        return;
+      }
+    } catch (error) {
+      if (error && error.name === 'AbortError') {
+        shareStatus.textContent = 'Partilha cancelada. Podes tentar novamente.';
+        return;
+      }
+    }
+    downloadFallback(blob, filename);
+    shareStatus.textContent = 'A partilha direta não está disponível neste browser. A resposta foi descarregada para a enviares manualmente.';
+  }
+
+  function renderRequest(value) {
+    request = value;
+    budgetSelections = new Map();
+    settlementSelections = new Map(value.incomes.map(income => [income.transactionId, new Set(income.previousExpenseIds)]));
+    summary.textContent = `${value.expenses.length} despesas · ${value.incomes.length} receitas disponíveis para liquidação`;
+    renderExpenses();
+    renderSettlementList();
+    workspace.classList.remove('hidden');
+    updateCompletion();
+  }
+
+  fileInput.addEventListener('change', async () => {
+    status.textContent = '';
+    shareStatus.textContent = '';
+    workspace.classList.add('hidden');
+    request = null;
+    budgetSelections = new Map();
+    settlementSelections = new Map();
+    const file = fileInput.files && fileInput.files[0];
+    if (!file) return;
+    if (file.size > 2 * 1024 * 1024) {
+      status.textContent = 'O pedido excede o limite de 2 MB.';
+      return;
+    }
+    try {
+      const parsed = JSON.parse(await file.text());
+      validateRequest(parsed);
+      renderRequest(parsed);
+    } catch (error) {
+      status.textContent = error instanceof SyntaxError ? 'Não foi possível ler o ficheiro. Confirma que escolheste o pedido original.' : (error.message || 'Não foi possível abrir o pedido.');
+    }
+  });
+
+  sendButton.addEventListener('click', sendResponse);
+})();
+</script>
+</body>
+</html>

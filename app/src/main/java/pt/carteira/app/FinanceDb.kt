@@ -77,6 +77,15 @@ data class BudgetPeriod(val budgetId: Long, val monthStart: Long, val limitAmoun
         if (value.id == 0L) addTransaction(value) else updateTransaction(value)
         if (rule != null) saveBudgetRule(rule)
     }
+    @Transaction suspend fun applyClassificationChanges(
+        budgetUpdates: List<FinanceTransaction>,
+        incomeUpdates: List<FinanceTransaction>,
+        settlementExpenseUpdates: List<FinanceTransaction>
+    ) {
+        budgetUpdates.forEach { updateTransaction(it) }
+        incomeUpdates.forEach { updateTransaction(it) }
+        settlementExpenseUpdates.forEach { updateTransaction(it) }
+    }
     @Transaction suspend fun splitTransaction(first: FinanceTransaction, second: FinanceTransaction) {
         updateTransaction(first)
         addTransaction(second)

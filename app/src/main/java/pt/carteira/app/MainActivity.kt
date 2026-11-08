@@ -1,6 +1,9 @@
 package pt.carteira.app
 
+import android.content.ClipData
+import android.content.Intent
 import android.os.Bundle
+import androidx.core.content.FileProvider
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -206,6 +209,115 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
             dao.saveTransactionAndRule(value.copy(budgetId=budget.id),rule)
         }
     }
+    internal fun prepareClassificationImport(context:android.content.Context,rawResponse:String,onComplete:(ClassificationImportPreview?,String?)->Unit) = viewModelScope.launch {
+        val result=try {
+            val response=parseClassificationResponse(rawResponse)
+            val requestFile=classificationRequestFile(context,response.requestId)
+            if(!requestFile.isFile) error("Este pedido não está pendente nesta Carteira ou já foi importado. Pede um novo ficheiro de resposta.")
+            val request=withContext(Dispatchers.IO){parseClassificationRequest(requestFile.readText(Charsets.UTF_8))}
+            val validated=validateClassificationAssignments(request,response)
+            validated.preview
+        } catch(cancelled:CancellationException){throw cancelled}
+        catch(error:Exception){onComplete(null,error.message?:"Não foi possível validar a resposta.");return@launch}
+        onComplete(result,null)
+    }
+    internal fun importClassificationResponse(context:android.content.Context,preview:ClassificationImportPreview,onComplete:(Boolean,String?)->Unit) = viewModelScope.launch {
+        try {
+            val requestFile=classificationRequestFile(context,preview.requestId)
+            if(!requestFile.isFile) error("O pedido original já não está disponível. Cria um pedido novo.")
+            val request=withContext(Dispatchers.IO){parseClassificationRequest(requestFile.readText(Charsets.UTF_8))}
+            val response=ClassificationResponse(
+                preview.requestId,
+                preview.assignments.map{ClassificationResponseAssignment(it.transactionId,it.budgetId)},
+                preview.settlements.map{ClassificationResponseSettlement(it.incomeId,it.expenseIds)}
+            )
+            val validated=validateClassificationAssignments(request,response)
+            if(validated.preview!=preview)
+                error("A resposta mudou desde a pré-visualização. Importa-a novamente.")
+            dao.applyClassificationChanges(validated.budgetUpdates,validated.incomeUpdates,validated.settlementExpenseUpdates)
+            withContext(Dispatchers.IO){requestFile.delete()}
+            onComplete(true,null)
+        } catch(cancelled:CancellationException){throw cancelled}
+        catch(error:Exception){onComplete(false,error.message?:"Não foi possível importar a classificação.")}
+    }
+    private suspend fun validateClassificationAssignments(
+        request:ClassificationRequest,response:ClassificationResponse
+    ):ValidatedClassificationChanges{
+        if(response.requestId!=request.requestId) error("A resposta não corresponde ao pedido original.")
+        if(System.currentTimeMillis()-request.createdAt>30L*24*60*60*1000) error("Este pedido expirou. Cria um pedido novo.")
+        if(response.assignments.isEmpty()&&response.settlements.isEmpty())error("A resposta não contém classificações nem liquidações.")
+        val requestedExpenses=request.expenses.associateBy{it.transactionId}
+        val requestedIncomes=request.incomes.associateBy{it.transactionId}
+        if(response.assignments.any{it.transactionId !in requestedExpenses}||response.settlements.any{it.incomeId !in requestedIncomes})
+            error("A resposta contém movimentos que não pertencem ao pedido.")
+        if(response.settlements.any{settlement->settlement.expenseIds.any{it !in requestedExpenses}})
+            error("A liquidação contém despesas que não pertencem ao pedido.")
+        val stored=dao.transactionsByIds(request.expenses.map{it.transactionId}+request.incomes.map{it.transactionId}).associateBy{it.id}
+        val budgets=dao.allBudgets().associateBy{it.id}
+        val budgetUpdates=mutableListOf<FinanceTransaction>()
+        val incomeUpdates=mutableListOf<FinanceTransaction>()
+        val settlementExpenseUpdates=mutableListOf<FinanceTransaction>()
+        val assignmentPreview=mutableListOf<ClassificationImportAssignment>()
+        val settlementPreview=mutableListOf<ClassificationImportSettlement>()
+        response.assignments.forEach{assignment->
+            val item=requestedExpenses[assignment.transactionId]?:error("Falta uma despesa no pedido.")
+            if(item.budgets.none{it.id==assignment.budgetId}) error("A resposta escolheu um orçamento que não estava disponível para este movimento.")
+            val transaction=stored[item.transactionId]?:error("Um movimento do pedido já não existe. Cria um pedido novo.")
+            val amount=BigDecimal.valueOf(kotlin.math.abs(transaction.amount)).setScale(2,RoundingMode.HALF_UP)
+            val requestedAmount=BigDecimal.valueOf(item.amount).setScale(2,RoundingMode.HALF_UP)
+            val unchanged=transaction.kind=="Despesa"&&transaction.budgetId==null&&transaction.active&&transaction.settlementRevenueId==null&&
+                transaction.title==item.title&&transaction.date==item.date&&amount.compareTo(requestedAmount)==0
+            if(!unchanged) error("O movimento ‘${item.displayTitle}’ foi alterado ou já não está por classificar. Cria um pedido novo.")
+            val budget=budgets[assignment.budgetId]?:error("Um orçamento escolhido já não existe. Pede uma nova classificação.")
+            if(!budgetVisibleInMonth(budget,currentMonthStart(transaction.date))) error("O orçamento ‘${budget.name}’ já não está disponível para este movimento.")
+            budgetUpdates+=transaction.copy(budgetId=budget.id)
+            assignmentPreview+=ClassificationImportAssignment(transaction.id,budget.id,item.displayTitle,budget.name)
+        }
+        response.settlements.forEach{settlement->
+            val incomeItem=requestedIncomes[settlement.incomeId]?:error("A receita da liquidação não pertence ao pedido.")
+            val income=stored[incomeItem.transactionId]?:error("Uma receita do pedido já não existe. Cria um pedido novo.")
+            if(!income.amount.isFinite())error("O valor da receita não é válido para liquidar.")
+            val previousExpenses=dao.settlementExpenses(income.id)
+            if(previousExpenses.map{it.id}.toSet()!=incomeItem.previousExpenseIds.toSet())
+                error("A liquidação da receita mudou desde o envio. Cria um pedido novo.")
+            val incomeAmount=BigDecimal.valueOf(kotlin.math.abs(income.amount)).setScale(2,RoundingMode.HALF_UP)
+            val requestedIncomeAmount=BigDecimal.valueOf(incomeItem.amount).setScale(2,RoundingMode.HALF_UP)
+            val expectedIncomeActive=previousExpenses.isEmpty()
+            val validIncome=income.kind=="Receita"&&income.active==expectedIncomeActive&&income.active==incomeItem.active&&income.budgetId==null&&
+                income.title==incomeItem.title&&income.date==incomeItem.date&&incomeAmount.compareTo(requestedIncomeAmount)==0
+            if(!validIncome)
+                error("A receita ‘${incomeItem.displayTitle}’ foi alterada ou já não está disponível para liquidar.")
+            val expenseItems=settlement.expenseIds.map{id->requestedExpenses[id]?:error("Uma despesa da liquidação não pertence ao pedido.")}
+            val expenses=settlement.expenseIds.map{id->stored[id]?:error("Uma despesa da liquidação já não existe. Cria um pedido novo.")}
+            val validExpenses=expenses.zip(expenseItems).all{(expense,item)->
+                if(!expense.amount.isFinite())return@all false
+                val amount=BigDecimal.valueOf(kotlin.math.abs(expense.amount)).setScale(2,RoundingMode.HALF_UP)
+                val requestedAmount=BigDecimal.valueOf(item.amount).setScale(2,RoundingMode.HALF_UP)
+                val stateMatches=if(item.settlementIncomeId==null)expense.active&&expense.settlementRevenueId==null
+                    else item.settlementIncomeId==income.id&&!expense.active&&expense.settlementRevenueId==income.id
+                expense.kind=="Despesa"&&stateMatches&&expense.active==item.active&&expense.budgetId==null&&
+                    expense.title==item.title&&expense.date==item.date&&amount.compareTo(requestedAmount)==0
+            }
+            if(!validExpenses)error("Uma despesa escolhida para liquidar foi alterada, atribuída ou já não está disponível.")
+            val total=expenses.fold(BigDecimal.ZERO){sum,expense->sum.add(BigDecimal.valueOf(kotlin.math.abs(expense.amount)).setScale(2,RoundingMode.HALF_UP))}.setScale(2,RoundingMode.HALF_UP)
+            if(total.compareTo(incomeAmount)!=0)error("As despesas escolhidas para ‘${incomeItem.displayTitle}’ não somam exatamente o valor da receita.")
+            incomeUpdates+=income.copy(active=false)
+            val selectedIds=settlement.expenseIds.toSet()
+            settlementExpenseUpdates+=previousExpenses.filter{it.id !in selectedIds}.map{it.copy(active=true,settlementRevenueId=null)}
+            settlementExpenseUpdates+=expenses.map{it.copy(active=false,settlementRevenueId=income.id)}
+            settlementPreview+=ClassificationImportSettlement(
+                incomeId=income.id,
+                incomeTitle=incomeItem.displayTitle,
+                incomeAmount=incomeAmount.toDouble(),
+                expenseIds=expenses.map{it.id},
+                expenseTitles=expenseItems.map{it.displayTitle}
+            )
+        }
+        return ValidatedClassificationChanges(
+            budgetUpdates,incomeUpdates,settlementExpenseUpdates,
+            ClassificationImportPreview(request.requestId,assignmentPreview,settlementPreview)
+        )
+    }
     fun settleIncome(incomeId:Long,expenseIds:Set<Long>,onComplete:(Boolean)->Unit) = viewModelScope.launch {
         val settled=try {
             val income=dao.transactionById(incomeId)
@@ -300,6 +412,7 @@ class MainActivity : ComponentActivity() {
     val budgetRules by model.budgetRules.collectAsState()
     val context=LocalContext.current
     val coroutineScope=rememberCoroutineScope()
+    LaunchedEffect(Unit){withContext(Dispatchers.IO){cleanupExpiredClassificationRequests(context)}}
     var section by remember { mutableStateOf("Início") }; var dialog by remember { mutableStateOf("") }
     var pendingDelete by remember { mutableStateOf<FinanceTransaction?>(null) }
     var pendingBulkDelete by remember { mutableStateOf<List<FinanceTransaction>?>(null) }
@@ -325,6 +438,10 @@ class MainActivity : ComponentActivity() {
     var csvImportError by remember { mutableStateOf<String?>(null) }
     var csvImportResult by remember { mutableStateOf<CsvImportResult?>(null) }
     var csvImporting by remember { mutableStateOf(false) }
+    var classificationNotice by remember { mutableStateOf<String?>(null) }
+    var pendingClassificationImport by remember { mutableStateOf<ClassificationImportPreview?>(null) }
+    var classificationImporting by remember { mutableStateOf(false) }
+    var classificationImportedMessage by remember { mutableStateOf<String?>(null) }
     val csvPicker=rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()){uri->
         if(uri!=null) coroutineScope.launch {
             try {
@@ -341,6 +458,74 @@ class MainActivity : ComponentActivity() {
         }
     }
     fun openCsvPicker(){csvImportError=null;csvPicker.launch(arrayOf("text/csv","text/comma-separated-values","application/vnd.ms-excel","text/plain","*/*"))}
+    val classificationPicker=rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()){uri->
+        if(uri!=null) coroutineScope.launch {
+            try {
+                val raw=withContext(Dispatchers.IO){
+                    val bytes=context.contentResolver.openInputStream(uri)?.use{it.readBytes()}?:error("Não foi possível abrir o ficheiro selecionado.")
+                    if(bytes.size>2*1024*1024) error("A resposta é demasiado grande para importar (limite: 2 MB).")
+                    bytes.toString(Charsets.UTF_8)
+                }
+                model.prepareClassificationImport(context,raw){preview,error->
+                    if(error!=null) classificationNotice=error else pendingClassificationImport=preview
+                }
+            } catch(cancelled:CancellationException){throw cancelled}
+            catch(error:Exception){classificationNotice=error.message?:"Não foi possível ler a resposta de classificação."}
+        }
+    }
+    fun openClassificationPicker(){classificationNotice=null;classificationPicker.launch(arrayOf("application/json","text/json","*/*"))}
+    fun requestMovementClassification(selected:List<FinanceTransaction>){
+        val selectedIds=selected.map{it.id}.toSet()
+        val selectedIncomes=selected.filter{income->
+            income.kind=="Receita"&&settlementIncomeCanBeRequested(income,transactions)&&
+                transactions.filter{it.settlementRevenueId==income.id}.all{it.id in selectedIds}
+        }
+        val selectedExpenses=selected.filter{it.kind=="Despesa"&&it.budgetId==null&&it.active&&it.settlementRevenueId==null}
+        val incomeRequests=selectedIncomes.filter{income->
+            transactions.any{it.settlementRevenueId==income.id}||selectedExpenses.isNotEmpty()
+        }.map{income->
+            val previous=selected.filter{it.settlementRevenueId==income.id}
+            ClassificationRequestIncome(income.id,income.date,income.title,income.title.ifBlank{"Receita"},
+                BigDecimal.valueOf(kotlin.math.abs(income.amount)).setScale(2,RoundingMode.HALF_UP).toDouble(),income.active,previous.map{it.id})
+        }
+        val incomeIds=incomeRequests.map{it.transactionId}.toSet()
+        val candidateExpenses=(selectedExpenses+selected.filter{it.settlementRevenueId?.let(incomeIds::contains)==true}).distinctBy{it.id}
+        val expenseRequests=candidateExpenses.mapNotNull{transaction->
+            val linkedIncomeId=transaction.settlementRevenueId?.takeIf{it in incomeIds}
+            val available=if(linkedIncomeId==null)budgets.filter{budgetVisibleInMonth(it,currentMonthStart(transaction.date))}
+                .map{ClassificationBudgetOption(it.id,it.name)} else emptyList()
+            if(available.isEmpty()&&incomeRequests.isEmpty())null else ClassificationRequestItem(
+                transactionId=transaction.id,
+                date=transaction.date,
+                title=transaction.title,
+                displayTitle=transaction.title.ifBlank{"Despesa"},
+                amount=BigDecimal.valueOf(kotlin.math.abs(transaction.amount)).setScale(2,RoundingMode.HALF_UP).toDouble(),
+                budgets=available,
+                active=transaction.active,
+                settlementIncomeId=linkedIncomeId
+            )
+        }
+        if(expenseRequests.isEmpty()){
+            classificationNotice="Seleciona despesas sem orçamento para classificar ou uma receita e despesas elegíveis para liquidar."
+            return
+        }
+        val request=ClassificationRequest(UUID.randomUUID().toString(),System.currentTimeMillis(),expenseRequests,incomeRequests)
+        coroutineScope.launch {
+            try {
+                val file=withContext(Dispatchers.IO){saveClassificationRequest(context,request)}
+                val uri=FileProvider.getUriForFile(context,"${context.packageName}.classification-files",file)
+                val send=Intent(Intent.ACTION_SEND).apply{
+                    type="application/json"
+                    putExtra(Intent.EXTRA_STREAM,uri)
+                    putExtra(Intent.EXTRA_SUBJECT,"Movimentos para classificar")
+                    putExtra(Intent.EXTRA_TEXT,"Abre o formulário no browser para classificar despesas e/ou liquidar receitas. Depois partilha a resposta de volta:\nhttps://jokasman.github.io/carteira/classificacao/")
+                    clipData=ClipData.newUri(context.contentResolver,file.name,uri)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                context.startActivity(Intent.createChooser(send,"Enviar pedido de classificação"))
+            } catch(error:Exception){classificationNotice=error.message?:"Não foi possível preparar o pedido para partilhar."}
+        }
+    }
     fun addMovement(budgetId: Long? = null) { pendingEdit = null; movementBudgetId = budgetId; dialog = "movimento" }
     fun editMovement(value: FinanceTransaction) { pendingEdit = value; movementBudgetId = null; dialog = "movimento" }
     val activeBudget = budgets.firstOrNull { it.id == activeBudgetId }
@@ -359,7 +544,7 @@ class MainActivity : ComponentActivity() {
     } }, floatingActionButton={ if(section in listOf("Movimentos","Orçamentos","Contas")||(section=="DetalheOrçamento"&&canAddBudgetMovement)) FloatingActionButton(onClick={when(section){"Orçamentos"->{pendingEdit=null;dialog="orçamento"};"Contas"->dialog="conta";"DetalheOrçamento"->addMovement(activeBudgetId);else->addMovement()}},containerColor=Green,contentColor=Color.White){Icon(Icons.Default.Add,"Adicionar")} }) { pad ->
         when(section) {
             "Início" -> HomePage(Modifier.padding(pad), total, transactions, accounts, budgets, budgetPeriods, {section=it}, {pendingDelete=it}, {editMovement(it)}, {addMovement()}, {budget->activeBudgetId=budget.id;selectedBudgetMonth=currentMonthStart();section="DetalheOrçamento"})
-            "Movimentos" -> TransactionsPage(Modifier.padding(pad), transactions, accounts, budgets, selectedMovementIds, {selectedMovementIds=it}, {pendingBulkDelete=it}, {pendingBudgetAssignment=it;dialog="atribuir-orçamento"}, {editMovement(it)}, {addMovement()}, {openCsvPicker()}, {pendingSettlementIncome=it;dialog="liquidar-receita"}, {pendingSettlementDetails=it;dialog="ver-liquidacao"})
+            "Movimentos" -> TransactionsPage(Modifier.padding(pad), transactions, accounts, budgets, selectedMovementIds, {selectedMovementIds=it}, {pendingBulkDelete=it}, {pendingBudgetAssignment=it;dialog="atribuir-orçamento"}, {editMovement(it)}, {addMovement()}, {openCsvPicker()}, {openClassificationPicker()}, {requestMovementClassification(it)}, {pendingSettlementIncome=it;dialog="liquidar-receita"}, {pendingSettlementDetails=it;dialog="ver-liquidacao"})
             "Contas" -> AccountsPage(Modifier.padding(pad), accounts, transactions, {pendingAccountEdit=null;dialog="conta"}, {pendingAccountEdit=it;dialog="editar-conta"})
             "Orçamentos" -> BudgetsPage(Modifier.padding(pad), budgets, transactions, budgetPeriods, selectedBudgetMonth, {selectedBudgetMonth=it}, budgetSort, {budgetSort=it}, showBudgetRemaining, {showBudgetRemaining=it}, {pendingBudgetLimit=null;pendingBudgetEdit=null;dialog="orçamento"}, {budget->addMovement(budget.id)}, {budget->activeBudgetId=budget.id;section="DetalheOrçamento"})
             "DetalheOrçamento" -> BudgetDetailPage(Modifier.padding(pad), activeBudget, transactions, accounts, budgetPeriods, selectedBudgetMonth, {selectedBudgetMonth=it}, {addMovement(activeBudget?.id)}, {pendingDelete=it}, {editMovement(it)}, {budget,monthStart,amount->pendingBudgetLimit=BudgetLimitTarget(budget.id,monthStart,amount);dialog="budget-limit"}, {budget->pendingBudgetEdit=budget;dialog="editar-orçamento"}, {budget->pendingBudgetArchive=budget})
@@ -450,6 +635,62 @@ class MainActivity : ComponentActivity() {
             confirmButton={TextButton(onClick={csvImportResult=null;section="Movimentos"}){Text("Ver movimentos",color=Green)}}
         )
     }
+    classificationNotice?.let{message->
+        AlertDialog(
+            onDismissRequest={classificationNotice=null},
+            title={Text("Classificação de movimentos",color=Ink,fontWeight=FontWeight.Bold)},
+            text={Text(message,color=Muted)},
+            confirmButton={TextButton(onClick={classificationNotice=null}){Text("OK",color=Green)}}
+        )
+    }
+    pendingClassificationImport?.let{preview->
+        AlertDialog(
+            onDismissRequest={if(!classificationImporting)pendingClassificationImport=null},
+            title={Text("Importar classificação?",color=Ink,fontWeight=FontWeight.Bold)},
+            text={
+                Column(Modifier.heightIn(max=380.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(8.dp)){
+                    Text("Confirma as decisões. Cada liquidação tem de igualar exatamente o valor da receita.",color=Muted)
+                    preview.assignments.forEach{assignment->
+                        Column(Modifier.fillMaxWidth().background(Paper,RoundedCornerShape(12.dp)).padding(10.dp)){
+                            Text("Classificar: ${assignment.movementTitle}",color=Ink,fontWeight=FontWeight.SemiBold)
+                            Text("→ ${assignment.budgetName}",color=Green,style=MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                    preview.settlements.forEach{settlement->
+                        Column(Modifier.fillMaxWidth().background(Paper,RoundedCornerShape(12.dp)).padding(10.dp),verticalArrangement=Arrangement.spacedBy(4.dp)){
+                            Text("Liquidar ${settlement.incomeTitle}",color=Ink,fontWeight=FontWeight.SemiBold)
+                            Text("Receita ${money(settlement.incomeAmount)} · ${settlement.expenseTitles.size} despesas",color=Green,style=MaterialTheme.typography.bodySmall)
+                            Text(settlement.expenseTitles.joinToString("\n"){"• $it"},color=Muted,style=MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+            },
+            confirmButton={TextButton(enabled=!classificationImporting,onClick={
+                classificationImporting=true
+                model.importClassificationResponse(context,preview){success,error->
+                    classificationImporting=false
+                    if(success){
+                        val settledExpenses=preview.settlements.sumOf{it.expenseIds.size}
+                        classificationImportedMessage=listOfNotNull(
+                            preview.assignments.size.takeIf{it>0}?.let{"$it despesas classificadas"},
+                            preview.settlements.size.takeIf{it>0}?.let{"${preview.settlements.size} receitas liquidadas ($settledExpenses despesas)"}
+                        ).joinToString(". ")
+                        pendingClassificationImport=null
+                    }else{
+                        pendingClassificationImport=null
+                        classificationNotice=error?:"Não foi possível importar a classificação."
+                    }
+                }
+            }){Text(if(classificationImporting)"A importar…" else "Aplicar decisões",color=Green,fontWeight=FontWeight.Bold)}},
+            dismissButton={TextButton(enabled=!classificationImporting,onClick={pendingClassificationImport=null}){Text("Cancelar",color=Muted)}}
+        )
+    }
+    classificationImportedMessage?.let{message->AlertDialog(
+        onDismissRequest={classificationImportedMessage=null},
+        title={Text("Resposta importada",color=Ink,fontWeight=FontWeight.Bold)},
+        text={Text(message,color=Muted)},
+        confirmButton={TextButton(onClick={classificationImportedMessage=null;section="Movimentos";selectedMovementIds=emptySet()}){Text("Ver movimentos",color=Green)}}
+    )}
 }
 
 @Composable private fun HomePage(modifier:Modifier,total:Double,tx:List<FinanceTransaction>,accounts:List<Account>,budgets:List<Budget>,budgetPeriods:List<BudgetPeriod>,navigate:(String)->Unit,requestDelete:(FinanceTransaction)->Unit,requestEdit:(FinanceTransaction)->Unit,addMovement:()->Unit,openBudget:(Budget)->Unit) {
@@ -491,7 +732,8 @@ class MainActivity : ComponentActivity() {
 @Composable private fun TransactionsPage(
     modifier:Modifier,tx:List<FinanceTransaction>,accounts:List<Account>,budgets:List<Budget>,selectedIds:Set<Long>,onSelectionChange:(Set<Long>)->Unit,
     requestDeleteSelected:(List<FinanceTransaction>)->Unit,assignBudget:(FinanceTransaction)->Unit,
-    requestEdit:(FinanceTransaction)->Unit,addMovement:()->Unit,importCsv:()->Unit,
+    requestEdit:(FinanceTransaction)->Unit,addMovement:()->Unit,importCsv:()->Unit,importClassificationResponse:()->Unit,
+    requestClassification:(List<FinanceTransaction>)->Unit,
     requestSettlement:(FinanceTransaction)->Unit,viewSettlement:(FinanceTransaction)->Unit
 ){
     var kindFilter by remember{mutableStateOf("Todos")}
@@ -524,6 +766,17 @@ class MainActivity : ComponentActivity() {
     }}
     val selectedMovements=tx.filter{it.id in selectedIds}
     val selectionMode=selectedIds.isNotEmpty()
+    val selectedUnassignedExpenses=selectedMovements.filter{it.kind=="Despesa"&&it.budgetId==null&&it.active&&it.settlementRevenueId==null}
+    val classifiableSelectedCount=selectedMovements.count{transaction->
+        transaction in selectedUnassignedExpenses&&
+            budgets.any{budgetVisibleInMonth(it,currentMonthStart(transaction.date))}
+    }
+    val requestableIncomeCount=selectedMovements.count{income->
+        income.kind=="Receita"&&settlementIncomeCanBeRequested(income,tx)&&
+            tx.filter{it.settlementRevenueId==income.id}.all{it.id in selectedIds}&&
+            (tx.any{it.settlementRevenueId==income.id}||selectedUnassignedExpenses.isNotEmpty())
+    }
+    val canSendClassificationRequest=classifiableSelectedCount>0||requestableIncomeCount>0
     val visibleIds=filtered.map{it.id}.toSet()
     val allVisibleSelected=visibleIds.isNotEmpty()&&visibleIds.all{it in selectedIds}
     val dateFormatter=remember{SimpleDateFormat("dd/MM/yyyy",Locale("pt","PT"))}
@@ -538,6 +791,9 @@ class MainActivity : ComponentActivity() {
             Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){
                 TextButton(onClick={onSelectionChange(emptySet())}){Text("Cancelar",color=Green)}
                 Text("${selectedMovements.size} selecionado(s)",Modifier.weight(1f),color=Muted,style=MaterialTheme.typography.labelMedium,textAlign=TextAlign.Center)
+                IconButton(onClick={requestClassification(selectedMovements)},enabled=canSendClassificationRequest,modifier=Modifier.size(42.dp)){
+                    Icon(Icons.Default.Share,"Pedir classificação ou liquidação",tint=if(canSendClassificationRequest)Green else Muted,modifier=Modifier.size(20.dp))
+                }
                 Button(onClick={requestDeleteSelected(selectedMovements)},enabled=selectedMovements.isNotEmpty(),colors=ButtonDefaults.buttonColors(containerColor=Coral),contentPadding=PaddingValues(horizontal=12.dp,vertical=8.dp)){
                     Icon(Icons.Default.Delete,null,modifier=Modifier.size(18.dp));Spacer(Modifier.width(5.dp));Text("Eliminar")
                 }
@@ -550,7 +806,8 @@ class MainActivity : ComponentActivity() {
             }
         } else Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){
             Text("${filtered.size} movimentos",Modifier.weight(1f),color=Muted,style=MaterialTheme.typography.labelSmall)
-            TextButton(onClick=importCsv,contentPadding=PaddingValues(horizontal=6.dp,vertical=2.dp)){Icon(Icons.Default.FileOpen,null,tint=Green,modifier=Modifier.size(18.dp));Spacer(Modifier.width(4.dp));Text("CSV",color=Green)}
+            TextButton(onClick=importCsv,contentPadding=PaddingValues(horizontal=5.dp,vertical=2.dp)){Icon(Icons.Default.FileOpen,null,tint=Green,modifier=Modifier.size(17.dp));Spacer(Modifier.width(3.dp));Text("CSV",color=Green)}
+            TextButton(onClick=importClassificationResponse,contentPadding=PaddingValues(horizontal=5.dp,vertical=2.dp)){Icon(Icons.Default.AssignmentTurnedIn,null,tint=Green,modifier=Modifier.size(17.dp));Spacer(Modifier.width(3.dp));Text("Resposta",color=Green)}
         }
         Row(horizontalArrangement=Arrangement.spacedBy(6.dp),modifier=Modifier.horizontalScroll(rememberScrollState()).padding(bottom=2.dp)){
             listOf("Todos","Despesa","Receita","Transferência","Ajuste").forEach{option->AssistChip(onClick={kindFilter=option},label={Text(option)},colors=AssistChipDefaults.assistChipColors(containerColor=if(kindFilter==option)Mint else Color.White))}
@@ -576,7 +833,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
-        if(selectionMode) Text("${filtered.size} movimentos · mantém premido para selecionar mais",color=Muted,style=MaterialTheme.typography.labelSmall,modifier=Modifier.padding(bottom=5.dp))
+        if(selectionMode) Text("$classifiableSelectedCount despesas classificáveis · $requestableIncomeCount receitas liquidáveis · mantém premido para selecionar mais",color=Muted,style=MaterialTheme.typography.labelSmall,modifier=Modifier.padding(bottom=5.dp))
         if(filtered.isEmpty()) EmptyCard(if(tx.isEmpty())"Sem movimentos" else "Sem resultados",if(tx.isEmpty())"Importa o extrato CSV ou adiciona movimentos manualmente." else "Não há movimentos com estes filtros.","Novo movimento",addMovement)
         else LazyColumn(verticalArrangement=Arrangement.spacedBy(9.dp)){items(filtered,key={it.id}){transaction->
             val isSelected=transaction.id in selectedIds
@@ -714,7 +971,15 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private fun budgetVisibleInMonth(budget:Budget,monthStart:Long):Boolean = budget.archivedFromMonth?.let{monthStart<it}?:true
+internal fun budgetVisibleInMonth(budget:Budget,monthStart:Long):Boolean = budget.archivedFromMonth?.let{monthStart<it}?:true
+
+private fun settlementIncomeCanBeRequested(income:FinanceTransaction,transactions:List<FinanceTransaction>):Boolean{
+    if(income.kind!="Receita"||!income.amount.isFinite()||kotlin.math.abs(income.amount)<0.01)return false
+    val previous=transactions.filter{it.settlementRevenueId==income.id}
+    return if(previous.isEmpty())income.active else !income.active&&previous.all{
+        it.kind=="Despesa"&&it.budgetId==null&&it.settlementRevenueId==income.id&&!it.active
+    }
+}
 
 private fun budgetTransactions(budget:Budget,tx:List<FinanceTransaction>,monthStart:Long):List<FinanceTransaction> = tx.filter { t ->
     t.kind=="Despesa" && currentMonthStart(t.date)==monthStart && t.budgetId==budget.id
