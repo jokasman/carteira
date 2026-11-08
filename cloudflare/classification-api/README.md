@@ -30,3 +30,11 @@ Não publiques um `database_id` de exemplo. O endereço da aplicação não é s
 - `POST /api/submit` recebe o token e a resposta. O Worker valida a soma exata da divisão e aceita liquidações por `expensePartRefs` (`transactionId` + índice da parte); partes com orçamento não podem ser liquidadas. O remetente importa cada parte como movimento independente na Carteira. Só é aceite uma resposta por pedido.
 
 As chamadas não guardam o token na query string. A página coloca-o apenas no fragmento do link, que não é enviado numa navegação HTTP normal.
+
+## Publicação automática
+
+O workflow `.github/workflows/deploy-worker.yml` publica o Worker em cada push para `main` que altere esta pasta ou `docs/`, e pode ser executado manualmente em **Actions → Deploy classification Worker → Run workflow**.
+
+- Requer os secrets de repositório `CLOUDFLARE_API_TOKEN` (modelo **Edit Cloudflare Workers**, limitado à conta do Worker) e `CLOUDFLARE_ACCOUNT_ID`. Nunca os guardar no repositório.
+- Usa `wranglerVersion: "4"`. Com o Wrangler 3.x, o deploy falha com `Missing entry-point`, porque essa versão não lê `wrangler.jsonc`.
+- Não aplica migrações D1; se uma migração nova for necessária, corre `npx wrangler d1 migrations apply carteira-classificacao --remote` com o Wrangler autenticado.

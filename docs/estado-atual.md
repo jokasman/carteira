@@ -32,7 +32,7 @@ Atualizado em 8 de novembro de 2026.
 ## Android e entrega de APK
 
 - `applicationId`: `pt.jokasman.carteira`. Não o alteres para futuras atualizações.
-- APK atual: `Carteira-APK-v1.2.4-42505469468.apk`, criado pelo run GitHub Actions `42505469468` a partir do commit `100df3666c9c2d890bb8f064199b14c4822c6974`; pacote `pt.jokasman.carteira`, versão `1.2.4` (versionCode `7`).
+- APK atual: versão `1.2.5` (versionCode `8`), pacote `pt.jokasman.carteira`, criado pelo run GitHub Actions `42508618351` a partir do commit `e9bf39a96f6fc02370c5cf8f4f963377cb61b265` (artefacto `Carteira-APK`, disponível até 6 de fevereiro de 2027). Inclui a divisão de despesas e a liquidação por partes. A versão `1.2.4` (run `42505469468`) é anterior e não liquida partes individualmente. Ainda não foi confirmado o SHA-256 do `.apk` nem a cópia para **Carteira APKs**.
 - O certificado SHA-256 da assinatura (`43af88f1f82380dbc2d22205dbe44a8e8013dec2f2750ac1bfb995422708f83e`) coincide com o APK anterior; `applicationId` e assinatura estável foram mantidos.
 - SHA-256 do APK: `B66D8F413CA1B7DF7E62F0FA39E69E06F66C780B78778F49B5E2A42E85293138`. Guardado em **Ambiente de Trabalho/Carteira APKs**. Regra do utilizador: guardar aí todos os próximos APKs.
 - O build Android terminou com sucesso no run `42505469468`; o GitHub Pages foi publicado no run `42505469619` e serve a classificação em `https://jokasman.github.io/carteira/classificacao/`.
@@ -43,8 +43,9 @@ Atualizado em 8 de novembro de 2026.
 - A importação bancária continua a usar CSV. O utilizador cancelou Enable Banking/Firebase e pediu para reverter essa integração; não retomar backend local nem cloud sem um pedido explícito.
 - Uma despesa pode ser guardada sem orçamento, editada e dividida sem associação obrigatória. Orçamentos continuam opcionais e podem ser associados depois.
 - A app permanece nativa Android, com dados locais e sem sincronização de contas. O remetente carrega o pedido e descarrega a resposta JSON; o classificador trabalha no link sem ficheiros.
+- O Worker é publicado automaticamente pelo workflow `.github/workflows/deploy-worker.yml` (push para `main` que altere `cloudflare/classification-api/` ou `docs/`, ou execução manual em Actions), com os secrets de repositório `CLOUDFLARE_API_TOKEN` e `CLOUDFLARE_ACCOUNT_ID`. O workflow usa `wranglerVersion: "4"`; versões antigas do Wrangler não leem `wrangler.jsonc`. Última publicação com sucesso: run `42525358597` (8 de novembro de 2026, 21:28 UTC), a partir do commit `97104d7`, que inclui a validação de partes liquidadas.
 - O Worker e a D1 estão publicados na conta Cloudflare reclamada; o GitHub Pages serve a interface e chama a API do Worker. A migração D1 está aplicada.
-- O Wrangler local não está autenticado na conta Cloudflare permanente; o Worker ativo continua acessível e futuras alterações ao backend exigirão `wrangler login` ou um API Token limitado à conta.
+- O Wrangler local não está autenticado na conta Cloudflare; não é necessário para publicar, porque o deploy corre no GitHub Actions. A migração D1 não é aplicada pelo workflow e continua manual (`wrangler d1 migrations apply --remote`).
 - O GitHub Pages publica `docs/` a partir de `main`; `docs/classificacao/config.js` define a origem Worker da API.
 - A página e o Worker validam as escolhas e cada liquidação por igualdade exata em cêntimos; a página e a Carteira validam novamente as partes das despesas divididas antes de importar. O Worker aceita uma única resposta por tarefa.
 - Não foi feito um teste de ponta a ponta num telemóvel com movimentos reais ou WhatsApp nesta alteração.
