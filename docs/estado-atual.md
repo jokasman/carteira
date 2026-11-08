@@ -28,23 +28,22 @@ Atualizado em 8 de novembro de 2026.
 - A ligação de resposta transporta o ID do pedido e apenas os IDs das decisões; o remetente descarrega o JSON ao abrir essa ligação.
 - O pedido original fica na área privada da app por até 30 dias, é excluído das cópias de segurança Android e é apagado após importação bem-sucedida.
 - A app volta a validar o pedido, o estado atual dos movimentos, a disponibilidade do orçamento e a igualdade exata dos totais. As alterações à base de dados são aplicadas em transação.
-- Build local da versão `1.2.0` terminou com sucesso; o JavaScript da página passou a análise sintática e as ligações de pedido/resposta passaram um teste local de ida e volta.
-- A publicação da página e a geração do APK assinado desta versão são feitas pelos workflows de GitHub Actions na branch `main`.
 
 ## Android e entrega de APK
 
 - `applicationId`: `pt.jokasman.carteira`. Não o alteres para futuras atualizações.
-- APK da versão anterior: `Carteira-APK-42473137427.apk`, criado pelo run GitHub Actions `42473137427` a partir do commit `a05a57c`; pacote `pt.jokasman.carteira`, versão `1.1.0` (versionCode `2`).
-- Esta alteração prepara a versão `1.2.0` (versionCode `3`) para instalar como atualização, mantendo o mesmo `applicationId` e a assinatura estável.
-- O ficheiro foi guardado na pasta OneDrive **Ambiente de Trabalho/Carteira APKs**. Regra do utilizador: guardar aí todos os próximos APKs.
-- Na versão anterior, o build Android terminou com sucesso e o deploy de GitHub Pages a partir de `main` terminou no run `42473305688`.
+- APK desta versão: `Carteira-APK-42480740611.apk`, criado pelo run GitHub Actions `42480740611` a partir do commit `d2a2d95`; pacote `pt.jokasman.carteira`, versão `1.2.0` (versionCode `3`).
+- O certificado SHA-256 da assinatura coincide com o APK anterior; o `applicationId` e a assinatura estável foram mantidos.
+- O APK foi guardado em **Ambiente de Trabalho/Carteira APKs**. Regra do utilizador: guardar aí todos os próximos APKs.
+- O build Android desta versão terminou com sucesso no run `42480740611`; o deploy GitHub Pages terminou com sucesso no run `42480740453`.
 - Para futuros APKs: fazer push autorizado para `main`, esperar pelo workflow **Build Android APK**, descarregar o artefacto `Carteira-APK`, confirmar package/signature e copiar o `.apk` para **Carteira APKs** no Ambiente de Trabalho. Não adicionar APKs ao Git.
 
 ## Decisões e verificação
 
 - A importação bancária continua a usar CSV. O utilizador cancelou Enable Banking/Firebase e pediu para reverter essa integração; não retomar backend local nem cloud sem um pedido explícito.
 - A app permanece nativa Android, com dados locais e sem sincronização de contas.
-- Confirmado: build Android CI, deploy do site e carregamento público do formulário.
+- Build local da versão `1.2.0` concluído; o JavaScript da página passou a análise sintática e as ligações de pedido/resposta passaram um teste local de ida e volta.
+- O site público responde com a página atualizada e o workflow de GitHub Pages confirmou o deploy.
 - Não foi feito um teste de ponta a ponta num telemóvel com movimentos reais ou WhatsApp nesta alteração.
 - No checkout de trabalho podem existir `.gradle/`, `app/build/` e `build/` não rastreados; não os adicionar ao Git.
 
