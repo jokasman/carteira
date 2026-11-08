@@ -1,9 +1,8 @@
 package pt.carteira.app
 
-import android.content.ClipData
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
-import androidx.core.content.FileProvider
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -439,6 +438,7 @@ class MainActivity : ComponentActivity() {
     var csvImportResult by remember { mutableStateOf<CsvImportResult?>(null) }
     var csvImporting by remember { mutableStateOf(false) }
     var classificationNotice by remember { mutableStateOf<String?>(null) }
+    var pendingClassificationRequest by remember { mutableStateOf<ClassificationRequest?>(null) }
     var pendingClassificationImport by remember { mutableStateOf<ClassificationImportPreview?>(null) }
     var classificationImporting by remember { mutableStateOf(false) }
     var classificationImportedMessage by remember { mutableStateOf<String?>(null) }
@@ -474,6 +474,29 @@ class MainActivity : ComponentActivity() {
         }
     }
     fun openClassificationPicker(){classificationNotice=null;classificationPicker.launch(arrayOf("application/json","text/json","*/*"))}
+    val classificationRequestExporter=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")){uri->
+        val request=pendingClassificationRequest
+        pendingClassificationRequest=null
+        if(uri==null) classificationNotice="A exportação do pedido foi cancelada."
+        else if(request==null) classificationNotice="Não foi possível recuperar o pedido para exportar."
+        else coroutineScope.launch {
+            try {
+                withContext(Dispatchers.IO){
+                    saveClassificationRequest(context,request)
+                    val bytes=request.toJson().toString().toByteArray(Charsets.UTF_8)
+                    context.contentResolver.openOutputStream(uri,"w")?.use{it.write(bytes)}
+                        ?:error("Não foi possível guardar o pedido no local escolhido.")
+                }
+                classificationNotice="Pedido guardado. Carrega este ficheiro na página Classificar e liquidar para criar a ligação a enviar."
+                runCatching {
+                    context.startActivity(Intent(Intent.ACTION_VIEW,Uri.parse("https://jokasman.github.io/carteira/classificacao/")))
+                }.onFailure {
+                    classificationNotice="Pedido guardado. Abre https://jokasman.github.io/carteira/classificacao/ e carrega o ficheiro para criar a ligação."
+                }
+            } catch(cancelled:CancellationException){throw cancelled}
+            catch(error:Exception){classificationNotice=error.message?:"Não foi possível exportar o pedido de classificação."}
+        }
+    }
     fun requestMovementClassification(selected:List<FinanceTransaction>){
         val selectedIds=selected.map{it.id}.toSet()
         val selectedIncomes=selected.filter{income->
@@ -510,21 +533,8 @@ class MainActivity : ComponentActivity() {
             return
         }
         val request=ClassificationRequest(UUID.randomUUID().toString(),System.currentTimeMillis(),expenseRequests,incomeRequests)
-        coroutineScope.launch {
-            try {
-                val file=withContext(Dispatchers.IO){saveClassificationRequest(context,request)}
-                val uri=FileProvider.getUriForFile(context,"${context.packageName}.classification-files",file)
-                val send=Intent(Intent.ACTION_SEND).apply{
-                    type="application/json"
-                    putExtra(Intent.EXTRA_STREAM,uri)
-                    putExtra(Intent.EXTRA_SUBJECT,"Movimentos para classificar")
-                    putExtra(Intent.EXTRA_TEXT,"Abre o formulário no browser para classificar despesas e/ou liquidar receitas. Depois partilha a resposta de volta:\nhttps://jokasman.github.io/carteira/classificacao/")
-                    clipData=ClipData.newUri(context.contentResolver,file.name,uri)
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                }
-                context.startActivity(Intent.createChooser(send,"Enviar pedido de classificação"))
-            } catch(error:Exception){classificationNotice=error.message?:"Não foi possível preparar o pedido para partilhar."}
-        }
+        pendingClassificationRequest=request
+        classificationRequestExporter.launch("carteira-pedido-${request.requestId.take(8)}.json")
     }
     fun addMovement(budgetId: Long? = null) { pendingEdit = null; movementBudgetId = budgetId; dialog = "movimento" }
     fun editMovement(value: FinanceTransaction) { pendingEdit = value; movementBudgetId = null; dialog = "movimento" }

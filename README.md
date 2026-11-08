@@ -15,13 +15,13 @@ Aplicação nativa Android de finanças pessoais, construída com Kotlin, Jetpac
 
 ## Classificar movimentos com outra pessoa
 
-Em **Movimentos**, mantém premido um movimento e seleciona os restantes que queres enviar. Toca no ícone de partilha e escolhe uma aplicação, como WhatsApp. O pedido inclui apenas os movimentos selecionados que sejam elegíveis. Para cada despesa, só seguem os orçamentos disponíveis no mês respetivo. Para rever uma liquidação existente, seleciona a receita e todas as despesas já associadas.
+Em **Movimentos**, mantém premido um movimento e seleciona os restantes que queres enviar. Toca no ícone de partilha e guarda o pedido JSON no dispositivo; a app abre a página de classificação. O pedido inclui apenas os movimentos selecionados que sejam elegíveis. Para cada despesa, só seguem os orçamentos disponíveis no mês respetivo. Para rever uma liquidação existente, seleciona a receita e todas as despesas já associadas.
 
-A outra pessoa abre [Classificar e liquidar](https://jokasman.github.io/carteira/classificacao/), escolhe o ficheiro do pedido no browser e atribui orçamentos e/ou liquida receitas. Para liquidar uma receita, as despesas incluídas têm de somar exatamente o mesmo valor. Em Android, **Enviar resposta** abre a partilha do sistema; noutros browsers, descarrega a resposta JSON. Na Carteira, toca em **Resposta**, escolhe o ficheiro, revê as decisões e toca em **Aplicar decisões**.
+O remetente abre [Classificar e liquidar](https://jokasman.github.io/carteira/classificacao/), carrega localmente o pedido e cria uma ligação para enviar. A outra pessoa abre essa ligação e atribui orçamentos e/ou liquida receitas sem carregar ou descarregar ficheiros. Para liquidar uma receita, as despesas incluídas têm de somar exatamente o mesmo valor. No fim, partilha a ligação de resposta com o remetente. O remetente abre essa ligação, descarrega o JSON e, na Carteira, toca em **Resposta**, escolhe o ficheiro, revê as decisões e toca em **Aplicar decisões**.
 
 ### Privacidade
 
-O pedido contém somente os movimentos selecionados e os campos necessários à decisão. Não inclui a base de dados, contas ou notas. A página é estática e processa o ficheiro localmente no browser, sem o enviar ao site. A resposta contém apenas o identificador do pedido e as escolhas. A app guarda pedidos pendentes localmente por até 30 dias, exclui-os das cópias de segurança Android e valida novamente cada escolha antes de importar.
+O pedido contém somente os movimentos selecionados e os campos necessários à decisão. Não inclui a base de dados, contas ou notas. A página é estática e lê o pedido localmente no browser; os dados seguem embutidos no fragmento da ligação, que não é enviado ao site. Qualquer pessoa com a ligação consegue ver os movimentos incluídos. Não existe backend nem armazenamento partilhado. A ligação de resposta contém apenas o identificador do pedido e as escolhas. A app guarda pedidos pendentes localmente por até 30 dias, exclui-os das cópias de segurança Android e valida novamente cada escolha antes de importar.
 
 ### Publicação
 
@@ -41,4 +41,4 @@ O workflow **Build Android APK** compila em cada push para `main`, assina com a 
 
 Para o estado atual, os resultados de build e as instruções de continuidade, consulta [docs/estado-atual.md](docs/estado-atual.md). A importação bancária atual continua a ser por CSV; a integração Enable Banking/Firebase foi abandonada.
 
-Os movimentos permanecem no dispositivo. A classificação partilhada usa ficheiros de pedido e resposta; não sincroniza contas nem dá à outra pessoa acesso à base de dados.
+Os movimentos permanecem no dispositivo. A classificação partilhada usa ligações com o pedido e a resposta codificados no fragmento do URL; não sincroniza contas nem dá à outra pessoa acesso à base de dados.
