@@ -87,13 +87,13 @@ internal data class ClassificationImportPreview(
     val incomeSplits: List<ClassificationImportIncomeSplit> = emptyList()
 )
 
-internal data class ClassificationIncomePartChange(
+data class ClassificationIncomePartChange(
     val sourceIncomeId: Long,
     val partIndex: Int,
     val transaction: FinanceTransaction
 )
 
-internal data class ClassificationSettlementExpenseChange(
+data class ClassificationSettlementExpenseChange(
     val transaction: FinanceTransaction,
     val sourceIncomeId: Long? = null,
     val partIndex: Int? = null
