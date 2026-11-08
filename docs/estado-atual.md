@@ -5,7 +5,7 @@ Atualizado em 8 de novembro de 2026.
 ## Repositório e publicação
 
 - Repositório: `jokasman/carteira`; branch de produção: `main`.
-- O fluxo de classificação foi integrado no commit `a05a57c` (`Add movement classification sharing flow`).
+- A divisão de receitas na classificação partilhada foi integrada no commit `990b05f` (`Fix classification DAO visibility`), após a funcionalidade principal `963aa64`.
 - GitHub Pages está ativo a partir de `main` e `/docs`: https://jokasman.github.io/carteira/classificacao/.
 - A página estática vive em `docs/classificacao/index.html`.
 - As ligações antigas com pedidos/respostas embutidos são mantidas em `docs/classificacao/legacy.html` para não interromper classificações já partilhadas.
@@ -32,10 +32,10 @@ Atualizado em 8 de novembro de 2026.
 ## Android e entrega de APK
 
 - `applicationId`: `pt.jokasman.carteira`. Não o alteres para futuras atualizações.
-- APK atual: `Carteira-APK-v1.2.2-42500062515.apk`, criado pelo run GitHub Actions `42500062515` a partir do commit `0f2afe9`; pacote `pt.jokasman.carteira`, versão `1.2.2` (versionCode `5`).
-- O certificado SHA-256 da assinatura coincide com o APK anterior; `applicationId` e assinatura estável foram mantidos.
+- APK atual: `Carteira-APK-v1.2.3-42502683183.apk`, criado pelo run GitHub Actions `42502683183` a partir do commit `990b05f`; pacote `pt.jokasman.carteira`, versão `1.2.3` (versionCode `6`).
+- O certificado SHA-256 da assinatura (`43af88f1f82380dbc2d22205dbe44a8e8013dec2f2750ac1bfb995422708f83e`) coincide com o APK anterior; `applicationId` e assinatura estável foram mantidos.
 - O APK foi guardado em **Ambiente de Trabalho/Carteira APKs**. Regra do utilizador: guardar aí todos os próximos APKs.
-- O build Android terminou com sucesso no run `42500062515`; o GitHub Pages serve a classificação em `https://jokasman.github.io/carteira/classificacao/`.
+- O build Android terminou com sucesso no run `42502683183`; o GitHub Pages serve a classificação em `https://jokasman.github.io/carteira/classificacao/`.
 - Para futuros APKs: fazer push autorizado para `main`, esperar pelo workflow **Build Android APK**, descarregar o artefacto `Carteira-APK`, confirmar package/signature e copiar o `.apk` para **Carteira APKs** no Ambiente de Trabalho. Não adicionar APKs ao Git.
 
 ## Decisões e verificação
