@@ -5,7 +5,7 @@ Atualizado em 8 de novembro de 2026.
 ## Repositório e publicação
 
 - Repositório: `jokasman/carteira`; branch de produção: `main`.
-- A divisão de receitas na classificação partilhada foi integrada no commit `990b05f` (`Fix classification DAO visibility`), após a funcionalidade principal `963aa64`.
+- A divisão de receitas na classificação partilhada foi implementada no commit `963aa64`; `990b05f` corrige a visibilidade dos tipos usados pelo DAO.
 - GitHub Pages está ativo a partir de `main` e `/docs`: https://jokasman.github.io/carteira/classificacao/.
 - A página estática vive em `docs/classificacao/index.html`.
 - As ligações antigas com pedidos/respostas embutidos são mantidas em `docs/classificacao/legacy.html` para não interromper classificações já partilhadas.
