@@ -576,7 +576,7 @@ class MainActivity : ComponentActivity() {
                 withContext(Dispatchers.IO){
                     saveClassificationRequest(context,request)
                     val bytes=request.toJson().toString().toByteArray(Charsets.UTF_8)
-                    context.contentResolver.openOutputStream(uri,"w")?.use{it.write(bytes)}
+                    context.contentResolver.openOutputStream(uri,"wt")?.use{it.write(bytes)}
                         ?:error("Não foi possível guardar o pedido no local escolhido.")
                 }
                 classificationNotice="Pedido guardado. Carrega este ficheiro na página Classificar e liquidar para criar a ligação a enviar."

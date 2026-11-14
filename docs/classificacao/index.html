@@ -807,7 +807,7 @@
       status.textContent = 'Pedido guardado temporariamente. Envia a ligação apenas a quem deve ver estes movimentos.';
     } catch (error) {
       status.classList.remove('success');
-      status.textContent = error instanceof SyntaxError ? 'Não foi possível ler o ficheiro. Confirma que escolheste o pedido original.' : (error.message || 'Não foi possível guardar o pedido.');
+      status.textContent = error instanceof SyntaxError ? 'Não foi possível ler o ficheiro. Confirma que escolheste o pedido original e que o ficheiro não foi alterado. Detalhe: ' + String(error.message).slice(0, 160) : (error.message || 'Não foi possível guardar o pedido.');
     }
   });
 
