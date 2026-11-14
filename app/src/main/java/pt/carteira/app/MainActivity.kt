@@ -196,6 +196,11 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
             if(budget.archivedFromMonth==null) dao.updateBudget(budget.copy(archivedFromMonth=currentMonthStart()))
         }
     }
+    fun unarchiveBudget(budgetId:Long) = viewModelScope.launch {
+        dao.budgetById(budgetId)?.let { budget ->
+            if(budget.archivedFromMonth!=null) dao.updateBudget(budget.copy(archivedFromMonth=null))
+        }
+    }
     fun setBudgetClosed(budgetId:Long,monthStart:Long,closed:Boolean) = viewModelScope.launch {
         if(dao.budgetById(budgetId)==null) return@launch
         if(closed) dao.closeBudgetMonth(BudgetClosure(budgetId,monthStart)) else dao.reopenBudgetMonth(budgetId,monthStart)
@@ -664,8 +669,8 @@ class MainActivity : ComponentActivity() {
             "Início" -> HomePage(Modifier.padding(pad), total, transactions, accounts, budgets, budgetPeriods, {section=it}, {pendingDelete=it}, {editMovement(it)}, {addMovement()}, {budget->activeBudgetId=budget.id;selectedBudgetMonth=currentMonthStart();section="DetalheOrçamento"})
             "Movimentos" -> TransactionsPage(Modifier.padding(pad), transactions, accounts, budgets, closedKeys, selectedMovementIds, {selectedMovementIds=it}, {pendingBulkDelete=it}, {pendingBudgetAssignment=it;dialog="atribuir-orçamento"}, {editMovement(it)}, {addMovement()}, {openCsvPicker()}, {openClassificationPicker()}, {requestMovementClassification(it)}, {pendingSettlementIncome=it;dialog="liquidar-receita"}, {pendingSettlementDetails=it;dialog="ver-liquidacao"})
             "Contas" -> AccountsPage(Modifier.padding(pad), accounts, transactions, {pendingAccountEdit=null;dialog="conta"}, {pendingAccountEdit=it;dialog="editar-conta"})
-            "Orçamentos" -> BudgetsPage(Modifier.padding(pad), budgets, closedKeys, transactions, budgetPeriods, selectedBudgetMonth, {selectedBudgetMonth=it}, budgetSort, {budgetSort=it}, showBudgetRemaining, {showBudgetRemaining=it}, {pendingBudgetLimit=null;pendingBudgetEdit=null;dialog="orçamento"}, {budget->addMovement(budget.id)}, {budget->activeBudgetId=budget.id;section="DetalheOrçamento"})
-            "DetalheOrçamento" -> BudgetDetailPage(Modifier.padding(pad), activeBudget, activeBudget?.let{(it.id to selectedBudgetMonth) in closedKeys}?:false, {budget,closed->model.setBudgetClosed(budget.id,selectedBudgetMonth,closed)}, transactions, accounts, budgetPeriods, selectedBudgetMonth, {selectedBudgetMonth=it}, {addMovement(activeBudget?.id)}, {pendingDelete=it}, {editMovement(it)}, {budget,monthStart,amount->pendingBudgetLimit=BudgetLimitTarget(budget.id,monthStart,amount);dialog="budget-limit"}, {budget->pendingBudgetEdit=budget;dialog="editar-orçamento"}, {budget->pendingBudgetArchive=budget})
+            "Orçamentos" -> BudgetsPage(Modifier.padding(pad), budgets, closedKeys, transactions, budgetPeriods, selectedBudgetMonth, {selectedBudgetMonth=it}, budgetSort, {budgetSort=it}, showBudgetRemaining, {showBudgetRemaining=it}, {pendingBudgetLimit=null;pendingBudgetEdit=null;dialog="orçamento"}, {budget->addMovement(budget.id)}, {budget->activeBudgetId=budget.id;section="DetalheOrçamento"}, {budget->pendingBudgetArchive=budget}, {budget->model.unarchiveBudget(budget.id)})
+            "DetalheOrçamento" -> BudgetDetailPage(Modifier.padding(pad), activeBudget, activeBudget?.let{(it.id to selectedBudgetMonth) in closedKeys}?:false, {budget,closed->model.setBudgetClosed(budget.id,selectedBudgetMonth,closed)}, transactions, accounts, budgetPeriods, selectedBudgetMonth, {selectedBudgetMonth=it}, {addMovement(activeBudget?.id)}, {pendingDelete=it}, {editMovement(it)}, {budget,monthStart,amount->pendingBudgetLimit=BudgetLimitTarget(budget.id,monthStart,amount);dialog="budget-limit"}, {budget->pendingBudgetEdit=budget;dialog="editar-orçamento"}, {budget->pendingBudgetArchive=budget}, {budget->model.unarchiveBudget(budget.id)})
             else -> ReportsPage(Modifier.padding(pad), transactions)
         }
     }
@@ -729,7 +734,7 @@ class MainActivity : ComponentActivity() {
             onDismissRequest={pendingBudgetArchive=null},
             title={Text("Arquivar orçamento?",color=Ink,fontWeight=FontWeight.Bold)},
             text={Text("${budget.name} deixa de aparecer a partir deste mês, mas continua disponível nos meses anteriores.",color=Muted)},
-            confirmButton={TextButton(onClick={model.archiveBudget(budget.id);pendingBudgetArchive=null;selectedBudgetMonth=shiftMonth(currentMonthStart(),-1)}){Text("Arquivar",color=Coral)}},
+            confirmButton={TextButton(onClick={model.archiveBudget(budget.id);pendingBudgetArchive=null;if(section=="DetalheOrçamento")selectedBudgetMonth=shiftMonth(currentMonthStart(),-1)}){Text("Arquivar",color=Coral)}},
             dismissButton={TextButton(onClick={pendingBudgetArchive=null}){Text("Cancelar",color=Green)}}
         )
     }
@@ -1010,12 +1015,16 @@ class MainActivity : ComponentActivity() {
 @Composable private fun BudgetsPage(
     modifier:Modifier,budgets:List<Budget>,closedKeys:Set<Pair<Long,Long>>,tx:List<FinanceTransaction>,budgetPeriods:List<BudgetPeriod>,
     selectedMonth:Long,onMonthChange:(Long)->Unit,sort:String,onSortChange:(String)->Unit,
-    showRemaining:Boolean,onShowRemainingChange:(Boolean)->Unit,add:()->Unit,quickAdd:(Budget)->Unit,openBudget:(Budget)->Unit
+    showRemaining:Boolean,onShowRemainingChange:(Boolean)->Unit,add:()->Unit,quickAdd:(Budget)->Unit,openBudget:(Budget)->Unit,
+    archive:(Budget)->Unit,unarchive:(Budget)->Unit
 ){
     val allVisible=budgets.filter{budgetVisibleInMonth(it,selectedMonth)}
     var showClosed by remember{mutableStateOf(false)}
     val closedCount=allVisible.count{(it.id to selectedMonth) in closedKeys}
-    val visible=if(showClosed)allVisible else allVisible.filter{(it.id to selectedMonth) !in closedKeys}
+    var showArchived by remember{mutableStateOf(false)}
+    val archivedInMonth=budgets.filter{!budgetVisibleInMonth(it,selectedMonth)}
+    val visible=(if(showClosed)allVisible else allVisible.filter{(it.id to selectedMonth) !in closedKeys})+
+        (if(showArchived)archivedInMonth else emptyList())
     val sorted=when(sort){
         "Nome A–Z"->visible.sortedBy{it.name.lowercase(Locale("pt","PT"))}
         "Nome Z–A"->visible.sortedByDescending{it.name.lowercase(Locale("pt","PT"))}
@@ -1049,14 +1058,27 @@ class MainActivity : ComponentActivity() {
         }
         item { MonthNavigator(selectedMonth,onMonthChange) }
         item { BudgetTotalsCard(totalLimit,totalSpent,totalRemaining) }
-        if(closedCount>0) item {
-            AssistChip(onClick={showClosed=!showClosed},label={Text(if(showClosed)"A mostrar fechados ($closedCount)" else "Fechados ocultos ($closedCount)")},colors=AssistChipDefaults.assistChipColors(containerColor=if(showClosed)Mint else Color.White))
+        if(closedCount>0||archivedInMonth.isNotEmpty()) item {
+            Row(horizontalArrangement=Arrangement.spacedBy(6.dp),modifier=Modifier.horizontalScroll(rememberScrollState())){
+                if(closedCount>0) AssistChip(onClick={showClosed=!showClosed},label={Text(if(showClosed)"A mostrar fechados ($closedCount)" else "Fechados ocultos ($closedCount)")},colors=AssistChipDefaults.assistChipColors(containerColor=if(showClosed)Mint else Color.White))
+                if(archivedInMonth.isNotEmpty()) AssistChip(onClick={showArchived=!showArchived},label={Text(if(showArchived)"A mostrar arquivados (${archivedInMonth.size})" else "Arquivados ocultos (${archivedInMonth.size})")},colors=AssistChipDefaults.assistChipColors(containerColor=if(showArchived)Mint else Color.White))
+            }
         }
         if(sorted.isEmpty()) item {
             if(allVisible.isNotEmpty()) EmptyCard("Todos os orçamentos deste mês estão fechados","Mostra os fechados para os ver ou reabre um orçamento no respetivo detalhe.","Mostrar fechados",{showClosed=true})
             else EmptyCard("Sem orçamentos neste mês","Cria um limite mensal para acompanhar as tuas despesas.","Criar orçamento",add)
         }
-        else items(sorted,key={it.id}){budget->val closed=(budget.id to selectedMonth) in closedKeys;BudgetRow(budget,tx,budgetPeriods,selectedMonth,showRemaining,if(selectedMonth==currentMonthStart()&&!closed){{quickAdd(budget)}}else null,closed){openBudget(budget)}}
+        else items(sorted,key={it.id}){budget->
+            val closed=(budget.id to selectedMonth) in closedKeys
+            val archived=!budgetVisibleInMonth(budget,selectedMonth)
+            BudgetRow(
+                budget,tx,budgetPeriods,selectedMonth,showRemaining,
+                if(selectedMonth==currentMonthStart()&&!closed&&!archived){{quickAdd(budget)}}else null,
+                closed,archived,
+                if(budget.archivedFromMonth==null){{archive(budget)}}else{{unarchive(budget)}},
+                budget.archivedFromMonth!=null
+            ){openBudget(budget)}
+        }
         item { OutlinedButton(onClick=add,modifier=Modifier.fillMaxWidth()){Icon(Icons.Default.Add,null);Spacer(Modifier.width(6.dp));Text("Criar orçamento mensal")} }
     }
 }
@@ -1086,14 +1108,18 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-@Composable private fun BudgetRow(b:Budget,tx:List<FinanceTransaction>,periods:List<BudgetPeriod>,monthStart:Long,showRemaining:Boolean=false,onQuickAdd:(()->Unit)?=null,closed:Boolean=false,onClick:()->Unit){
+@Composable private fun BudgetRow(b:Budget,tx:List<FinanceTransaction>,periods:List<BudgetPeriod>,monthStart:Long,showRemaining:Boolean=false,onQuickAdd:(()->Unit)?=null,closed:Boolean=false,archived:Boolean=false,onArchiveToggle:(()->Unit)?=null,archiveToggleRestores:Boolean=false,onClick:()->Unit){
+    val tag=when{archived->"Arquivado";closed->"Fechado";else->null}
     val limit=budgetLimitFor(b,periods,monthStart).coerceAtLeast(0.01); val spent=budgetSpent(b,tx,monthStart); val ratio=spent/limit; val progress=ratio.toFloat().coerceIn(0f,1f)
     Column(Modifier.fillMaxWidth().clickable(onClick=onClick).background(Color.White,RoundedCornerShape(17.dp)).padding(horizontal=13.dp,vertical=10.dp)){
         Row(verticalAlignment=Alignment.CenterVertically){
-            Text(b.name,color=Ink,fontWeight=FontWeight.SemiBold,maxLines=1,modifier=Modifier.weight(1f,fill=!closed))
-            if(closed) Text("Fechado",color=Muted,style=MaterialTheme.typography.labelSmall,modifier=Modifier.weight(1f).padding(start=6.dp))
+            Text(b.name,color=Ink,fontWeight=FontWeight.SemiBold,maxLines=1,modifier=Modifier.weight(1f,fill=tag==null))
+            if(tag!=null) Text(tag,color=Muted,style=MaterialTheme.typography.labelSmall,modifier=Modifier.weight(1f).padding(start=6.dp))
             Text(if(showRemaining)money(limit-spent) else "${(ratio*100).toInt()}% de ${money(limit)}",color=if(ratio>1)Coral else Ink,fontWeight=FontWeight.SemiBold,style=MaterialTheme.typography.bodySmall,maxLines=1,softWrap=false,textAlign=TextAlign.End)
             if(onQuickAdd!=null) IconButton(onClick=onQuickAdd,modifier=Modifier.size(36.dp)){Icon(Icons.Default.Add,"Adicionar movimento a ${b.name}",tint=Green,modifier=Modifier.size(22.dp))}
+            if(onArchiveToggle!=null) IconButton(onClick=onArchiveToggle,modifier=Modifier.size(36.dp)){
+                Icon(if(archiveToggleRestores)Icons.Default.Unarchive else Icons.Default.Archive,if(archiveToggleRestores)"Desarquivar ${b.name}" else "Arquivar ${b.name}",tint=if(archiveToggleRestores)Green else Coral,modifier=Modifier.size(20.dp))
+            }
         }
         Spacer(Modifier.height(6.dp));LinearProgressIndicator(progress={progress},modifier=Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(5.dp)),color=if(ratio>1)Coral else Green,trackColor=Mint,strokeCap= androidx.compose.ui.graphics.StrokeCap.Round)
         Text(if(showRemaining)"Gasto ${money(spent)}" else if(spent>limit)"Ultrapassado ${money(spent-limit)}" else "Disponível ${money(limit-spent)}",color=if(ratio>1)Coral else Muted,style=MaterialTheme.typography.labelSmall,modifier=Modifier.padding(top=4.dp))
@@ -1104,7 +1130,7 @@ class MainActivity : ComponentActivity() {
     modifier:Modifier,budget:Budget?,closed:Boolean,setClosed:(Budget,Boolean)->Unit,tx:List<FinanceTransaction>,accounts:List<Account>,periods:List<BudgetPeriod>,
     selectedMonth:Long,onMonthChange:(Long)->Unit,add:()->Unit,requestDelete:(FinanceTransaction)->Unit,
     requestEdit:(FinanceTransaction)->Unit,editLimit:(Budget,Long,Double)->Unit,
-    editName:(Budget)->Unit,archive:(Budget)->Unit
+    editName:(Budget)->Unit,archive:(Budget)->Unit,unarchive:(Budget)->Unit
 ){
     if(budget==null){EmptyCard("Orçamento indisponível","Este orçamento já não existe.","Voltar aos orçamentos",{}) ; return}
     val records=budgetTransactions(budget,tx,selectedMonth)
@@ -1116,6 +1142,7 @@ class MainActivity : ComponentActivity() {
             Text("${records.size} registos",Modifier.weight(1f),color=Muted,style=MaterialTheme.typography.labelMedium)
             TextButton(onClick={editName(budget)}){Icon(Icons.Default.Edit,null);Spacer(Modifier.width(4.dp));Text("Editar nome")}
             if(budget.archivedFromMonth==null) TextButton(onClick={archive(budget)}){Icon(Icons.Default.Archive,null);Spacer(Modifier.width(4.dp));Text("Arquivar",color=Coral)}
+            else TextButton(onClick={unarchive(budget)}){Icon(Icons.Default.Unarchive,null,tint=Green);Spacer(Modifier.width(4.dp));Text("Desarquivar",color=Green)}
         }
         BudgetRow(budget,tx,periods,selectedMonth,closed=closed){ }
         Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.End){
