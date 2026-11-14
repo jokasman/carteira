@@ -8,6 +8,7 @@ Aplicação nativa Android de finanças pessoais, construída com Kotlin, Jetpac
 - Registo de despesas, receitas e transferências, com conta, nota e recorrência.
 - Gestão de várias contas e carteiras.
 - Orçamentos mensais e histórico de limites; despesas podem ficar sem orçamento e ser associadas depois.
+- Fecho mensal de orçamentos: no detalhe de um orçamento, **Fechar este mês** retira-o da listagem por defeito e impede associá-lo a novas despesas nesse mês (pedidos de classificação, associação manual, importação CSV e divisão). Os registos existentes mantêm-se e o orçamento pode ser reaberto.
 - Relatórios, filtros e ordenação de movimentos.
 - Importação de extratos CSV, deteção de duplicados e regras para associar orçamentos.
 - Envio de movimentos selecionados para classificação e liquidação por outra pessoa.

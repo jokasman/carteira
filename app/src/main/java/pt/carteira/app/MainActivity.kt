@@ -61,6 +61,7 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
     val categories = dao.categories().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     val budgetPeriods = dao.budgetPeriods().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     val budgetRules = dao.budgetRules().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    val budgetClosures = dao.budgetClosures().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     init {
         viewModelScope.launch {
             ensureDefaultAccount()
@@ -107,8 +108,10 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
             val staleRuleKey=if(current?.kind=="Despesa"&&current.budgetId!=null&&value.kind=="Despesa"&&value.budgetId==null&&ruleKey.isNotBlank())
                 dao.budgetRule(ruleKey)?.takeIf{it.budgetId==current.budgetId}?.merchantKey else null
             val budget = candidate.budgetId?.let { dao.budgetById(it) }
+            val budgetChanged=candidate.budgetId!=null&&(candidate.budgetId!=current?.budgetId||current?.date?.let{currentMonthStart(it)}!=currentMonthStart(candidate.date))
+            val closedBudget=budgetChanged&&budgetClosedInMonth(candidate.budgetId!!,currentMonthStart(candidate.date))
             val validBudget = when (candidate.kind) {
-                "Despesa" -> candidate.budgetId == null || budget != null
+                "Despesa" -> (candidate.budgetId == null || budget != null)&&!closedBudget
                 else -> candidate.budgetId == null
             }
             val validDestination = candidate.kind != "Transferência" ||
@@ -138,12 +141,13 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
             if(dao.accountById(accountId)==null) error("Seleciona uma conta válida para importar os movimentos.")
             val rules=dao.allBudgetRules().associateBy{it.merchantKey}
             val allBudgets=dao.allBudgets().associateBy{it.id}
+            val closedMonths=dao.allBudgetClosures().map{it.budgetId to it.monthStart}.toSet()
             val importedRows=csv.movements.map{movement->
                 val expense=movement.signedAmount<0
                 val key=normalizeMovementKey(movement.description)
                 val rule=if(expense)rules[key] else null
                 val budget=rule?.let{allBudgets[it.budgetId]}
-                val budgetId=budget?.takeIf{budgetVisibleInMonth(it,currentMonthStart(movement.date))}?.id
+                val budgetId=budget?.takeIf{budgetVisibleInMonth(it,currentMonthStart(movement.date))&&(it.id to currentMonthStart(movement.date)) !in closedMonths}?.id
                 val amount=BigDecimal.valueOf(kotlin.math.abs(movement.signedAmount)).setScale(2,RoundingMode.HALF_UP).toDouble()
                 val importKey=csvImportKey(accountId,movement,key)
                 FinanceTransaction(
@@ -192,6 +196,11 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
             if(budget.archivedFromMonth==null) dao.updateBudget(budget.copy(archivedFromMonth=currentMonthStart()))
         }
     }
+    fun setBudgetClosed(budgetId:Long,monthStart:Long,closed:Boolean) = viewModelScope.launch {
+        if(dao.budgetById(budgetId)==null) return@launch
+        if(closed) dao.closeBudgetMonth(BudgetClosure(budgetId,monthStart)) else dao.reopenBudgetMonth(budgetId,monthStart)
+    }
+    private suspend fun budgetClosedInMonth(budgetId:Long,monthStart:Long)=dao.budgetClosureCount(budgetId,monthStart)>0
     fun setBudgetLimit(budgetId:Long,monthStart:Long,amount:Double) = viewModelScope.launch {
         if(dao.budgetById(budgetId)!=null && amount.isFinite() && amount>=0.01) {
             dao.saveBudgetPeriod(BudgetPeriod(budgetId,monthStart,BigDecimal.valueOf(amount).setScale(2,RoundingMode.HALF_UP).toDouble()))
@@ -203,7 +212,7 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
     }
     fun assignBudget(value:FinanceTransaction,budgetId:Long,rememberForFuture:Boolean=false) = viewModelScope.launch {
         val budget=dao.budgetById(budgetId)
-        if(value.kind=="Despesa"&&value.budgetId==null&&budget!=null&&budgetVisibleInMonth(budget,currentMonthStart(value.date))) {
+        if(value.kind=="Despesa"&&value.budgetId==null&&budget!=null&&budgetVisibleInMonth(budget,currentMonthStart(value.date))&&!budgetClosedInMonth(budget.id,currentMonthStart(value.date))) {
             val key=normalizeMovementKey(value.title)
             val rule=if(rememberForFuture&&key.isNotBlank())BudgetRule(key,value.title.trim(),budget.id) else null
             dao.saveTransactionAndRule(value.copy(budgetId=budget.id),rule)
@@ -258,6 +267,7 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
             error("A liquidação contém parcelas que não pertencem ao pedido.")
         val stored=dao.transactionsByIds(request.expenses.map{it.transactionId}+request.incomes.map{it.transactionId}).associateBy{it.id}
         val budgets=dao.allBudgets().associateBy{it.id}
+        val closedMonths=dao.allBudgetClosures().map{it.budgetId to it.monthStart}.toSet()
         val splitByExpense=response.expenseSplits.associateBy{it.transactionId}
         val budgetUpdates=mutableListOf<FinanceTransaction>()
         val incomeUpdates=mutableListOf<FinanceTransaction>()
@@ -285,6 +295,7 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
                     if(item.budgets.none{it.id==part.budgetId})error("A resposta escolheu um orçamento que não estava disponível para esta despesa.")
                     val budget=budgets[part.budgetId]?:error("Um orçamento escolhido já não existe. Pede uma nova classificação.")
                     if(!budgetVisibleInMonth(budget,currentMonthStart(transaction.date)))error("O orçamento ‘${budget.name}’ já não está disponível para esta despesa.")
+                    if((budget.id to currentMonthStart(transaction.date)) in closedMonths)error("O orçamento ‘${budget.name}’ está fechado neste mês. Reabre-o ou cria um pedido novo.")
                     budget.name
                 }
                 ClassificationImportExpensePart(part.title.trim(),partAmount.toDouble(),part.budgetId,budgetName)
@@ -310,6 +321,7 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
             if(!unchanged) error("O movimento ‘${item.displayTitle}’ foi alterado ou já não está por classificar. Cria um pedido novo.")
             val budget=budgets[assignment.budgetId]?:error("Um orçamento escolhido já não existe. Pede uma nova classificação.")
             if(!budgetVisibleInMonth(budget,currentMonthStart(transaction.date))) error("O orçamento ‘${budget.name}’ já não está disponível para este movimento.")
+            if((budget.id to currentMonthStart(transaction.date)) in closedMonths) error("O orçamento ‘${budget.name}’ está fechado neste mês. Reabre-o ou cria um pedido novo.")
             if(splitByExpense.containsKey(transaction.id)) {
                 val expected=splitByExpense.getValue(transaction.id).parts.firstNotNullOfOrNull{it.budgetId}
                 if(expected!=budget.id)error("A classificação da despesa dividida é inconsistente.")
@@ -461,7 +473,7 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
             suspend fun validBudget(id:Long?):Boolean {
                 if(id==null)return true
                 val budget=dao.budgetById(id)?:return false
-                return budget.id==original.budgetId||budgetVisibleInMonth(budget,currentMonthStart(original.date))
+                return budget.id==original.budgetId||(budgetVisibleInMonth(budget,currentMonthStart(original.date))&&!budgetClosedInMonth(budget.id,currentMonthStart(original.date)))
             }
             val validBudgets=if(original.kind=="Despesa") validBudget(firstBudgetId)&&validBudget(secondBudgetId)
                 else firstBudgetId==null&&secondBudgetId==null
@@ -503,6 +515,8 @@ class MainActivity : ComponentActivity() {
 @Composable private fun CarteiraApp(model: FinanceModel) {
     val accounts by model.accounts.collectAsState(); val transactions by model.transactions.collectAsState(); val budgets by model.budgets.collectAsState(); val budgetPeriods by model.budgetPeriods.collectAsState()
     val budgetRules by model.budgetRules.collectAsState()
+    val budgetClosures by model.budgetClosures.collectAsState()
+    val closedKeys=remember(budgetClosures){budgetClosures.map{it.budgetId to it.monthStart}.toSet()}
     val context=LocalContext.current
     val coroutineScope=rememberCoroutineScope()
     LaunchedEffect(Unit){withContext(Dispatchers.IO){cleanupExpiredClassificationRequests(context)}}
@@ -609,7 +623,7 @@ class MainActivity : ComponentActivity() {
         val candidateExpenses=(selectedExpenses+selected.filter{it.settlementRevenueId?.let(incomeIds::contains)==true}).distinctBy{it.id}
         val expenseRequests=candidateExpenses.mapNotNull{transaction->
             val linkedIncomeId=transaction.settlementRevenueId?.takeIf{it in incomeIds}
-            val available=if(linkedIncomeId==null)budgets.filter{budgetVisibleInMonth(it,currentMonthStart(transaction.date))}
+            val available=if(linkedIncomeId==null)budgets.filter{budgetVisibleInMonth(it,currentMonthStart(transaction.date))&&(it.id to currentMonthStart(transaction.date)) !in closedKeys}
                 .map{ClassificationBudgetOption(it.id,it.name)} else emptyList()
             if(available.isEmpty()&&incomeRequests.isEmpty())null else ClassificationRequestItem(
                 transactionId=transaction.id,
@@ -633,7 +647,7 @@ class MainActivity : ComponentActivity() {
     fun addMovement(budgetId: Long? = null) { pendingEdit = null; movementBudgetId = budgetId; dialog = "movimento" }
     fun editMovement(value: FinanceTransaction) { pendingEdit = value; movementBudgetId = null; dialog = "movimento" }
     val activeBudget = budgets.firstOrNull { it.id == activeBudgetId }
-    val canAddBudgetMovement = activeBudget != null && selectedBudgetMonth == currentMonthStart() && activeBudget.archivedFromMonth == null
+    val canAddBudgetMovement = activeBudget != null && selectedBudgetMonth == currentMonthStart() && activeBudget.archivedFromMonth == null && (activeBudget.id to selectedBudgetMonth) !in closedKeys
     val pageTitle = if (section == "DetalheOrçamento") activeBudget?.name ?: "Orçamento" else section
     val total = accounts.sumOf { accountBalance(it, transactions) }
     Scaffold(containerColor=Paper, topBar={
@@ -648,23 +662,23 @@ class MainActivity : ComponentActivity() {
     } }, floatingActionButton={ if(section in listOf("Movimentos","Orçamentos","Contas")||(section=="DetalheOrçamento"&&canAddBudgetMovement)) FloatingActionButton(onClick={when(section){"Orçamentos"->{pendingEdit=null;dialog="orçamento"};"Contas"->dialog="conta";"DetalheOrçamento"->addMovement(activeBudgetId);else->addMovement()}},containerColor=Green,contentColor=Color.White){Icon(Icons.Default.Add,"Adicionar")} }) { pad ->
         when(section) {
             "Início" -> HomePage(Modifier.padding(pad), total, transactions, accounts, budgets, budgetPeriods, {section=it}, {pendingDelete=it}, {editMovement(it)}, {addMovement()}, {budget->activeBudgetId=budget.id;selectedBudgetMonth=currentMonthStart();section="DetalheOrçamento"})
-            "Movimentos" -> TransactionsPage(Modifier.padding(pad), transactions, accounts, budgets, selectedMovementIds, {selectedMovementIds=it}, {pendingBulkDelete=it}, {pendingBudgetAssignment=it;dialog="atribuir-orçamento"}, {editMovement(it)}, {addMovement()}, {openCsvPicker()}, {openClassificationPicker()}, {requestMovementClassification(it)}, {pendingSettlementIncome=it;dialog="liquidar-receita"}, {pendingSettlementDetails=it;dialog="ver-liquidacao"})
+            "Movimentos" -> TransactionsPage(Modifier.padding(pad), transactions, accounts, budgets, closedKeys, selectedMovementIds, {selectedMovementIds=it}, {pendingBulkDelete=it}, {pendingBudgetAssignment=it;dialog="atribuir-orçamento"}, {editMovement(it)}, {addMovement()}, {openCsvPicker()}, {openClassificationPicker()}, {requestMovementClassification(it)}, {pendingSettlementIncome=it;dialog="liquidar-receita"}, {pendingSettlementDetails=it;dialog="ver-liquidacao"})
             "Contas" -> AccountsPage(Modifier.padding(pad), accounts, transactions, {pendingAccountEdit=null;dialog="conta"}, {pendingAccountEdit=it;dialog="editar-conta"})
-            "Orçamentos" -> BudgetsPage(Modifier.padding(pad), budgets, transactions, budgetPeriods, selectedBudgetMonth, {selectedBudgetMonth=it}, budgetSort, {budgetSort=it}, showBudgetRemaining, {showBudgetRemaining=it}, {pendingBudgetLimit=null;pendingBudgetEdit=null;dialog="orçamento"}, {budget->addMovement(budget.id)}, {budget->activeBudgetId=budget.id;section="DetalheOrçamento"})
-            "DetalheOrçamento" -> BudgetDetailPage(Modifier.padding(pad), activeBudget, transactions, accounts, budgetPeriods, selectedBudgetMonth, {selectedBudgetMonth=it}, {addMovement(activeBudget?.id)}, {pendingDelete=it}, {editMovement(it)}, {budget,monthStart,amount->pendingBudgetLimit=BudgetLimitTarget(budget.id,monthStart,amount);dialog="budget-limit"}, {budget->pendingBudgetEdit=budget;dialog="editar-orçamento"}, {budget->pendingBudgetArchive=budget})
+            "Orçamentos" -> BudgetsPage(Modifier.padding(pad), budgets, closedKeys, transactions, budgetPeriods, selectedBudgetMonth, {selectedBudgetMonth=it}, budgetSort, {budgetSort=it}, showBudgetRemaining, {showBudgetRemaining=it}, {pendingBudgetLimit=null;pendingBudgetEdit=null;dialog="orçamento"}, {budget->addMovement(budget.id)}, {budget->activeBudgetId=budget.id;section="DetalheOrçamento"})
+            "DetalheOrçamento" -> BudgetDetailPage(Modifier.padding(pad), activeBudget, activeBudget?.let{(it.id to selectedBudgetMonth) in closedKeys}?:false, {budget,closed->model.setBudgetClosed(budget.id,selectedBudgetMonth,closed)}, transactions, accounts, budgetPeriods, selectedBudgetMonth, {selectedBudgetMonth=it}, {addMovement(activeBudget?.id)}, {pendingDelete=it}, {editMovement(it)}, {budget,monthStart,amount->pendingBudgetLimit=BudgetLimitTarget(budget.id,monthStart,amount);dialog="budget-limit"}, {budget->pendingBudgetEdit=budget;dialog="editar-orçamento"}, {budget->pendingBudgetArchive=budget})
             else -> ReportsPage(Modifier.padding(pad), transactions)
         }
     }
     if(dialog.isNotEmpty()) when(dialog) {
-        "movimento" -> TransactionDialog(accounts,budgets,budgetRules,budgets.firstOrNull{it.id==movementBudgetId},pendingEdit,{value,rememberRule,done->model.saveTransaction(value,rememberRule,done)},{pendingEdit=null;dialog="";movementBudgetId=null},{pendingEdit=null;movementBudgetId=null;dialog="orçamento"},{transaction->pendingSplit=transaction;dialog="dividir-movimento"})
-        "dividir-movimento" -> pendingSplit?.let{transaction->SplitTransactionDialog(transaction,budgets,{firstAmount,secondAmount,firstTitle,secondTitle,firstBudgetId,secondBudgetId,done->model.splitTransaction(transaction,firstAmount,secondAmount,firstTitle,secondTitle,firstBudgetId,secondBudgetId){success->done(success);if(success){pendingSplit=null;pendingEdit=null;movementBudgetId=null;dialog=""}}},{pendingSplit=null;dialog="movimento"})}
+        "movimento" -> TransactionDialog(accounts,budgets,closedKeys,budgetRules,budgets.firstOrNull{it.id==movementBudgetId},pendingEdit,{value,rememberRule,done->model.saveTransaction(value,rememberRule,done)},{pendingEdit=null;dialog="";movementBudgetId=null},{pendingEdit=null;movementBudgetId=null;dialog="orçamento"},{transaction->pendingSplit=transaction;dialog="dividir-movimento"})
+        "dividir-movimento" -> pendingSplit?.let{transaction->SplitTransactionDialog(transaction,budgets,closedKeys,{firstAmount,secondAmount,firstTitle,secondTitle,firstBudgetId,secondBudgetId,done->model.splitTransaction(transaction,firstAmount,secondAmount,firstTitle,secondTitle,firstBudgetId,secondBudgetId){success->done(success);if(success){pendingSplit=null;pendingEdit=null;movementBudgetId=null;dialog=""}}},{pendingSplit=null;dialog="movimento"})}
         "liquidar-receita" -> pendingSettlementIncome?.let{income->
             val linked=transactions.filter{it.settlementRevenueId==income.id}
             val candidates=transactions.filter{(it.kind=="Despesa"&&it.active&&it.budgetId==null&&it.settlementRevenueId==null)||it.settlementRevenueId==income.id}
             SettleIncomeDialog(income,candidates,linked.map{it.id}.toSet(),{selectedIds,done->model.settleIncome(income.id,selectedIds,done)},{pendingSettlementIncome=null;dialog=""})
         }
         "ver-liquidacao" -> pendingSettlementDetails?.let{income->SettledExpensesDialog(income,transactions.filter{it.settlementRevenueId==income.id},{pendingSettlementDetails=null;pendingSettlementIncome=income;dialog="liquidar-receita"},{pendingSettlementDetails=null;pendingUndoSettlement=income;dialog=""},{pendingSettlementDetails=null;dialog=""})}
-        "atribuir-orçamento" -> pendingBudgetAssignment?.let{transaction->BudgetAssignmentDialog(transaction,budgets,{value,budgetId,remember->model.assignBudget(value,budgetId,remember);pendingBudgetAssignment=null;dialog=""},{pendingBudgetAssignment=null;dialog=""})}
+        "atribuir-orçamento" -> pendingBudgetAssignment?.let{transaction->BudgetAssignmentDialog(transaction,budgets,closedKeys,{value,budgetId,remember->model.assignBudget(value,budgetId,remember);pendingBudgetAssignment=null;dialog=""},{pendingBudgetAssignment=null;dialog=""})}
         "conta" -> AccountDialog(null,0.0, {value->model.saveAccount(value);dialog=""}, {dialog=""}, {})
         "editar-conta" -> AccountDialog(pendingAccountEdit, pendingAccountEdit?.let{accountBalance(it,transactions)}?:0.0, {value->model.saveAccount(value);pendingAccountEdit=null;dialog=""}, {pendingAccountEdit=null;dialog=""}, {account->adjustmentAccount=account;pendingAccountEdit=null;dialog="acerto-conta"})
         "orçamento" -> BudgetDialog(null,500.0,{name,limit->model.addBudget(name,limit);dialog=""},{dialog=""})
@@ -844,7 +858,7 @@ class MainActivity : ComponentActivity() {
 @Composable private fun AddMini(onClick:()->Unit){Column(Modifier.width(78.dp).height(108.dp).border(1.dp,Color(0xFFDCE5DF),RoundedCornerShape(18.dp)).clickable(onClick=onClick).padding(12.dp),verticalArrangement=Arrangement.Center,horizontalAlignment=Alignment.CenterHorizontally){Icon(Icons.Default.Add,null,tint=Green);Text("Nova",color=Muted,style=MaterialTheme.typography.labelSmall)} }
 
 @Composable private fun TransactionsPage(
-    modifier:Modifier,tx:List<FinanceTransaction>,accounts:List<Account>,budgets:List<Budget>,selectedIds:Set<Long>,onSelectionChange:(Set<Long>)->Unit,
+    modifier:Modifier,tx:List<FinanceTransaction>,accounts:List<Account>,budgets:List<Budget>,closedKeys:Set<Pair<Long,Long>>,selectedIds:Set<Long>,onSelectionChange:(Set<Long>)->Unit,
     requestDeleteSelected:(List<FinanceTransaction>)->Unit,assignBudget:(FinanceTransaction)->Unit,
     requestEdit:(FinanceTransaction)->Unit,addMovement:()->Unit,importCsv:()->Unit,importClassificationResponse:()->Unit,
     requestClassification:(List<FinanceTransaction>)->Unit,
@@ -886,7 +900,7 @@ class MainActivity : ComponentActivity() {
     val selectedUnassignedExpenses=selectedMovements.filter{it.kind=="Despesa"&&it.budgetId==null&&it.active&&it.settlementRevenueId==null}
     val classifiableSelectedCount=selectedMovements.count{transaction->
         transaction in selectedUnassignedExpenses&&
-            budgets.any{budgetVisibleInMonth(it,currentMonthStart(transaction.date))}
+            budgets.any{budgetVisibleInMonth(it,currentMonthStart(transaction.date))&&(it.id to currentMonthStart(transaction.date)) !in closedKeys}
     }
     val requestableIncomeCount=selectedMovements.count{income->
         income.kind=="Receita"&&settlementIncomeCanBeRequested(income,tx)&&
@@ -994,11 +1008,14 @@ class MainActivity : ComponentActivity() {
 @Composable private fun AccountDetail(a:Account,tx:List<FinanceTransaction>,edit:()->Unit){val bal=accountBalance(a,tx);Row(Modifier.fillMaxWidth().background(Color.White,RoundedCornerShape(18.dp)).padding(start=18.dp,top=12.dp,bottom=12.dp,end=8.dp),verticalAlignment=Alignment.CenterVertically){Icon(Icons.Default.AccountBalanceWallet,null,tint=Green,modifier=Modifier.size(40.dp));Column(Modifier.weight(1f).padding(start=14.dp)){Text(a.name,color=Ink,fontWeight=FontWeight.Bold);Text(a.type,color=Muted,style=MaterialTheme.typography.bodySmall)};Text(money(bal),color=Ink,fontWeight=FontWeight.Bold);IconButton(onClick=edit){Icon(Icons.Default.Edit,"Editar conta",tint=Green)}} }
 
 @Composable private fun BudgetsPage(
-    modifier:Modifier,budgets:List<Budget>,tx:List<FinanceTransaction>,budgetPeriods:List<BudgetPeriod>,
+    modifier:Modifier,budgets:List<Budget>,closedKeys:Set<Pair<Long,Long>>,tx:List<FinanceTransaction>,budgetPeriods:List<BudgetPeriod>,
     selectedMonth:Long,onMonthChange:(Long)->Unit,sort:String,onSortChange:(String)->Unit,
     showRemaining:Boolean,onShowRemainingChange:(Boolean)->Unit,add:()->Unit,quickAdd:(Budget)->Unit,openBudget:(Budget)->Unit
 ){
-    val visible=budgets.filter{budgetVisibleInMonth(it,selectedMonth)}
+    val allVisible=budgets.filter{budgetVisibleInMonth(it,selectedMonth)}
+    var showClosed by remember{mutableStateOf(false)}
+    val closedCount=allVisible.count{(it.id to selectedMonth) in closedKeys}
+    val visible=if(showClosed)allVisible else allVisible.filter{(it.id to selectedMonth) !in closedKeys}
     val sorted=when(sort){
         "Nome A–Z"->visible.sortedBy{it.name.lowercase(Locale("pt","PT"))}
         "Nome Z–A"->visible.sortedByDescending{it.name.lowercase(Locale("pt","PT"))}
@@ -1009,8 +1026,8 @@ class MainActivity : ComponentActivity() {
         "Menor percentagem"->visible.sortedBy{budgetSpent(it,tx,selectedMonth)/budgetLimitFor(it,budgetPeriods,selectedMonth).coerceAtLeast(.01)}
         else->visible.sortedByDescending{budgetSpent(it,tx,selectedMonth)}
     }
-    val totalLimit=moneySum(visible.map{budgetLimitFor(it,budgetPeriods,selectedMonth)})
-    val totalSpent=moneySum(visible.map{budgetSpent(it,tx,selectedMonth)})
+    val totalLimit=moneySum(allVisible.map{budgetLimitFor(it,budgetPeriods,selectedMonth)})
+    val totalSpent=moneySum(allVisible.map{budgetSpent(it,tx,selectedMonth)})
     val totalRemaining=moneySum(listOf(totalLimit,-totalSpent))
     var sortExpanded by remember{mutableStateOf(false)}
     LazyColumn(modifier.fillMaxSize(),contentPadding=PaddingValues(start=16.dp,end=16.dp,top=8.dp,bottom=16.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){
@@ -1032,8 +1049,14 @@ class MainActivity : ComponentActivity() {
         }
         item { MonthNavigator(selectedMonth,onMonthChange) }
         item { BudgetTotalsCard(totalLimit,totalSpent,totalRemaining) }
-        if(sorted.isEmpty()) item { EmptyCard("Sem orçamentos neste mês","Cria um limite mensal para acompanhar as tuas despesas.","Criar orçamento",add) }
-        else items(sorted,key={it.id}){budget->BudgetRow(budget,tx,budgetPeriods,selectedMonth,showRemaining,if(selectedMonth==currentMonthStart()){{quickAdd(budget)}}else null){openBudget(budget)}}
+        if(closedCount>0) item {
+            AssistChip(onClick={showClosed=!showClosed},label={Text(if(showClosed)"A mostrar fechados ($closedCount)" else "Fechados ocultos ($closedCount)")},colors=AssistChipDefaults.assistChipColors(containerColor=if(showClosed)Mint else Color.White))
+        }
+        if(sorted.isEmpty()) item {
+            if(allVisible.isNotEmpty()) EmptyCard("Todos os orçamentos deste mês estão fechados","Mostra os fechados para os ver ou reabre um orçamento no respetivo detalhe.","Mostrar fechados",{showClosed=true})
+            else EmptyCard("Sem orçamentos neste mês","Cria um limite mensal para acompanhar as tuas despesas.","Criar orçamento",add)
+        }
+        else items(sorted,key={it.id}){budget->val closed=(budget.id to selectedMonth) in closedKeys;BudgetRow(budget,tx,budgetPeriods,selectedMonth,showRemaining,if(selectedMonth==currentMonthStart()&&!closed){{quickAdd(budget)}}else null,closed){openBudget(budget)}}
         item { OutlinedButton(onClick=add,modifier=Modifier.fillMaxWidth()){Icon(Icons.Default.Add,null);Spacer(Modifier.width(6.dp));Text("Criar orçamento mensal")} }
     }
 }
@@ -1063,11 +1086,12 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-@Composable private fun BudgetRow(b:Budget,tx:List<FinanceTransaction>,periods:List<BudgetPeriod>,monthStart:Long,showRemaining:Boolean=false,onQuickAdd:(()->Unit)?=null,onClick:()->Unit){
+@Composable private fun BudgetRow(b:Budget,tx:List<FinanceTransaction>,periods:List<BudgetPeriod>,monthStart:Long,showRemaining:Boolean=false,onQuickAdd:(()->Unit)?=null,closed:Boolean=false,onClick:()->Unit){
     val limit=budgetLimitFor(b,periods,monthStart).coerceAtLeast(0.01); val spent=budgetSpent(b,tx,monthStart); val ratio=spent/limit; val progress=ratio.toFloat().coerceIn(0f,1f)
     Column(Modifier.fillMaxWidth().clickable(onClick=onClick).background(Color.White,RoundedCornerShape(17.dp)).padding(horizontal=13.dp,vertical=10.dp)){
         Row(verticalAlignment=Alignment.CenterVertically){
-            Text(b.name,color=Ink,fontWeight=FontWeight.SemiBold,maxLines=1,modifier=Modifier.weight(1f))
+            Text(b.name,color=Ink,fontWeight=FontWeight.SemiBold,maxLines=1,modifier=Modifier.weight(1f,fill=!closed))
+            if(closed) Text("Fechado",color=Muted,style=MaterialTheme.typography.labelSmall,modifier=Modifier.weight(1f).padding(start=6.dp))
             Text(if(showRemaining)money(limit-spent) else "${(ratio*100).toInt()}% de ${money(limit)}",color=if(ratio>1)Coral else Ink,fontWeight=FontWeight.SemiBold,style=MaterialTheme.typography.bodySmall,maxLines=1,softWrap=false,textAlign=TextAlign.End)
             if(onQuickAdd!=null) IconButton(onClick=onQuickAdd,modifier=Modifier.size(36.dp)){Icon(Icons.Default.Add,"Adicionar movimento a ${b.name}",tint=Green,modifier=Modifier.size(22.dp))}
         }
@@ -1077,7 +1101,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable private fun BudgetDetailPage(
-    modifier:Modifier,budget:Budget?,tx:List<FinanceTransaction>,accounts:List<Account>,periods:List<BudgetPeriod>,
+    modifier:Modifier,budget:Budget?,closed:Boolean,setClosed:(Budget,Boolean)->Unit,tx:List<FinanceTransaction>,accounts:List<Account>,periods:List<BudgetPeriod>,
     selectedMonth:Long,onMonthChange:(Long)->Unit,add:()->Unit,requestDelete:(FinanceTransaction)->Unit,
     requestEdit:(FinanceTransaction)->Unit,editLimit:(Budget,Long,Double)->Unit,
     editName:(Budget)->Unit,archive:(Budget)->Unit
@@ -1085,7 +1109,7 @@ class MainActivity : ComponentActivity() {
     if(budget==null){EmptyCard("Orçamento indisponível","Este orçamento já não existe.","Voltar aos orçamentos",{}) ; return}
     val records=budgetTransactions(budget,tx,selectedMonth)
     val archivedInSelectedMonth=budget.archivedFromMonth?.let{selectedMonth>=it}?:false
-    val canAdd=selectedMonth==currentMonthStart()&&!archivedInSelectedMonth
+    val canAdd=selectedMonth==currentMonthStart()&&!archivedInSelectedMonth&&!closed
     Column(modifier.fillMaxSize().padding(horizontal=16.dp)){
         MonthNavigator(selectedMonth,onMonthChange)
         Row(Modifier.fillMaxWidth().padding(top=4.dp,bottom=4.dp),verticalAlignment=Alignment.CenterVertically){
@@ -1093,8 +1117,12 @@ class MainActivity : ComponentActivity() {
             TextButton(onClick={editName(budget)}){Icon(Icons.Default.Edit,null);Spacer(Modifier.width(4.dp));Text("Editar nome")}
             if(budget.archivedFromMonth==null) TextButton(onClick={archive(budget)}){Icon(Icons.Default.Archive,null);Spacer(Modifier.width(4.dp));Text("Arquivar",color=Coral)}
         }
-        BudgetRow(budget,tx,periods,selectedMonth){ }
-        TextButton(onClick={editLimit(budget,selectedMonth,budgetLimitFor(budget,periods,selectedMonth))},modifier=Modifier.align(Alignment.End)){Text("Alterar limite deste mês",color=Green)}
+        BudgetRow(budget,tx,periods,selectedMonth,closed=closed){ }
+        Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.End){
+            if(!archivedInSelectedMonth) TextButton(onClick={setClosed(budget,!closed)}){Text(if(closed)"Reabrir este mês" else "Fechar este mês",color=if(closed)Green else Coral)}
+            TextButton(onClick={editLimit(budget,selectedMonth,budgetLimitFor(budget,periods,selectedMonth))}){Text("Alterar limite deste mês",color=Green)}
+        }
+        if(closed) Text("Orçamento fechado neste mês: não aparece na lista por defeito nem pode ser associado a novas despesas. Os registos existentes mantêm-se.",color=Muted,style=MaterialTheme.typography.bodySmall,modifier=Modifier.padding(vertical=4.dp))
         if(archivedInSelectedMonth) Text("Orçamento arquivado a partir deste mês. Os registos anteriores continuam disponíveis.",color=Muted,style=MaterialTheme.typography.bodySmall,modifier=Modifier.padding(vertical=4.dp))
         Text("Toca num movimento para editar; mantém premido para apagar.",color=Muted,style=MaterialTheme.typography.labelSmall)
         Row(Modifier.fillMaxWidth().padding(top=8.dp,bottom=8.dp),verticalAlignment=Alignment.CenterVertically){Text("Registos do mês",Modifier.weight(1f),style=MaterialTheme.typography.titleMedium,color=Ink,fontWeight=FontWeight.Bold);Text(records.size.toString(),color=Muted)}
@@ -1213,10 +1241,10 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun BudgetAssignmentDialog(
-    transaction:FinanceTransaction,budgets:List<Budget>,assign:(FinanceTransaction,Long,Boolean)->Unit,close:()->Unit
+    transaction:FinanceTransaction,budgets:List<Budget>,closedKeys:Set<Pair<Long,Long>>,assign:(FinanceTransaction,Long,Boolean)->Unit,close:()->Unit
 ){
     val movementMonth=currentMonthStart(transaction.date)
-    val availableBudgets=budgets.filter{budgetVisibleInMonth(it,movementMonth)}
+    val availableBudgets=budgets.filter{budgetVisibleInMonth(it,movementMonth)&&(it.id to movementMonth) !in closedKeys}
     var budgetId by remember(transaction.id){mutableLongStateOf(0L)}
     var expanded by remember{mutableStateOf(false)}
     var rememberForFuture by remember(transaction.id){mutableStateOf(false)}
@@ -1332,7 +1360,7 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun TransactionDialog(
-    accounts:List<Account>, budgets:List<Budget>, budgetRules:List<BudgetRule>,pinnedBudget:Budget?, initial:FinanceTransaction?,
+    accounts:List<Account>, budgets:List<Budget>, closedKeys:Set<Pair<Long,Long>>, budgetRules:List<BudgetRule>,pinnedBudget:Budget?, initial:FinanceTransaction?,
     save:(FinanceTransaction,Boolean,(Boolean)->Unit)->Unit, close:()->Unit, createBudget:()->Unit, split:(FinanceTransaction)->Unit
 ){
     val movementId=initial?.id?:0L
@@ -1353,7 +1381,8 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
     var accountMenu by remember{mutableStateOf(false)}; var destinationMenu by remember{mutableStateOf(false)}
     var budgetMenu by remember{mutableStateOf(false)}
     var error by remember{mutableStateOf("")}; var saving by remember{mutableStateOf(false)}
-    val availableBudgets=budgets.filter{budgetVisibleInMonth(it,currentMonthStart(initial?.date?:System.currentTimeMillis()))||it.id==initial?.budgetId}
+    val dialogMonth=currentMonthStart(initial?.date?:System.currentTimeMillis())
+    val availableBudgets=budgets.filter{(budgetVisibleInMonth(it,dialogMonth)&&(it.id to dialogMonth) !in closedKeys)||it.id==initial?.budgetId}
     val selectedBudget=pinnedBudget?:availableBudgets.firstOrNull{it.id==budgetId}
     val movementKinds=if(initial?.kind=="Ajuste") listOf("Despesa","Receita","Transferência","Ajuste") else listOf("Despesa","Receita","Transferência")
 
@@ -1497,7 +1526,7 @@ private fun defaultMovementCategory(kind:String):String=when(kind){
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun SplitTransactionDialog(
-    original:FinanceTransaction,budgets:List<Budget>,
+    original:FinanceTransaction,budgets:List<Budget>,closedKeys:Set<Pair<Long,Long>>,
     save:(Double,Double,String,String,Long?,Long?,(Boolean)->Unit)->Unit,close:()->Unit
 ){
     val total=BigDecimal.valueOf(kotlin.math.abs(original.amount)).setScale(2,RoundingMode.HALF_UP)
@@ -1517,7 +1546,8 @@ private fun defaultMovementCategory(kind:String):String=when(kind){
     var secondBudgetId by remember(original.id){mutableStateOf(original.budgetId)}
     var saving by remember(original.id){mutableStateOf(false)}
     var error by remember(original.id){mutableStateOf("")}
-    val availableBudgets=budgets.filter{budgetVisibleInMonth(it,currentMonthStart(original.date))||it.id==original.budgetId}
+    val splitMonth=currentMonthStart(original.date)
+    val availableBudgets=budgets.filter{(budgetVisibleInMonth(it,splitMonth)&&(it.id to splitMonth) !in closedKeys)||it.id==original.budgetId}
     AlertDialog(
         onDismissRequest={if(!saving)close()},
         title={Text("Dividir movimento",color=Ink,fontWeight=FontWeight.Bold)},
