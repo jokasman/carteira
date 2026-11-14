@@ -612,6 +612,8 @@
         row.append(checkbox, label);
         card.append(row);
       }
+      const settlementRows = [];
+      const targetCents = Math.round(income.amount * 100);
       request.expenses.forEach(item => {
         const dateLabel = new Date(item.date).toLocaleDateString('pt-PT');
         const split = expenseSplits.get(item.transactionId);
@@ -622,13 +624,16 @@
             const cents = amountCents(part.amountText);
             const partTitle = part.title.trim() || `Parcela ${partIndex + 1}`;
             const amountText = cents === null ? 'valor inválido' : money(cents / 100);
-            addExpenseRow(item, key, `${partTitle} · ${dateLabel} · ${amountText}`, cents === null);
+            settlementRows.push({ cents: cents === null ? Infinity : cents, date: item.date, args: [item, key, `${partTitle} · ${dateLabel} · ${amountText}`, cents === null] });
           });
           return;
         }
         if (budgetSelections.has(item.transactionId)) return;
-        addExpenseRow(item, item.transactionId, `${item.displayTitle} · ${dateLabel} · ${money(item.amount)}${item.settlementIncomeId === income.transactionId ? ' · atualmente liquidada aqui' : ''}`);
+        settlementRows.push({ cents: Math.round(item.amount * 100), date: item.date, args: [item, item.transactionId, `${item.displayTitle} · ${dateLabel} · ${money(item.amount)}${item.settlementIncomeId === income.transactionId ? ' · atualmente liquidada aqui' : ''}`] });
       });
+      // Primeiro as despesas com o valor exato da receita; depois as restantes por valor crescente.
+      settlementRows.sort((a, b) => (Number(a.cents !== targetCents) - Number(b.cents !== targetCents)) || (a.cents === b.cents ? 0 : a.cents < b.cents ? -1 : 1) || (b.date - a.date));
+      settlementRows.forEach(row => addExpenseRow(...row.args));
       const total = settlementTotal(income.transactionId);
       const target = Math.round(income.amount * 100);
       const amountLine = document.createElement('p');

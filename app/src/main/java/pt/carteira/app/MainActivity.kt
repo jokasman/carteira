@@ -1253,7 +1253,15 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
 @Composable private fun SettleIncomeDialog(
     income:FinanceTransaction,expenses:List<FinanceTransaction>,initialSelectedIds:Set<Long>,settle:(Set<Long>,(Boolean)->Unit)->Unit,close:()->Unit
 ){
-    val sortedExpenses=expenses.sortedWith(compareByDescending<FinanceTransaction>{it.date}.thenByDescending{it.id})
+    val targetCents=BigDecimal.valueOf(kotlin.math.abs(income.amount)).setScale(2,RoundingMode.HALF_UP).movePointRight(2).toBigInteger()
+    fun expenseCents(expense:FinanceTransaction)=BigDecimal.valueOf(kotlin.math.abs(expense.amount)).setScale(2,RoundingMode.HALF_UP).movePointRight(2).toBigInteger()
+    // Primeiro as despesas com o valor exato da receita; depois as restantes por valor crescente.
+    val sortedExpenses=expenses.sortedWith(
+        compareBy<FinanceTransaction>{if(expenseCents(it)==targetCents)0 else 1}
+            .thenBy{expenseCents(it)}
+            .thenByDescending{it.date}
+            .thenByDescending{it.id}
+    )
     var selectedIds by remember(income.id,initialSelectedIds){mutableStateOf(initialSelectedIds)}
     var saving by remember(income.id){mutableStateOf(false)}
     var error by remember(income.id){mutableStateOf("")}
