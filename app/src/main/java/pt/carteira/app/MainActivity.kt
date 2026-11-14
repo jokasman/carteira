@@ -102,8 +102,10 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
             val settlementLocked=current?.settlementRevenueId!=null||current?.let{it.kind=="Receita"&&dao.settlementExpenses(it.id).isNotEmpty()}==true
             val source = dao.accountById(value.accountId) ?: ensureDefaultAccount()
             val ruleKey=normalizeMovementKey(value.title)
-            val matchedBudget=if(value.kind=="Despesa"&&value.budgetId==null&&ruleKey.isNotBlank()) dao.budgetRule(ruleKey)?.let{rule->dao.budgetById(rule.budgetId)} else null
-            val candidate=if(matchedBudget!=null&&budgetVisibleInMonth(matchedBudget,currentMonthStart(value.date))) value.copy(budgetId=matchedBudget.id) else value
+            // O orçamento escolhido (ou a ausência dele) é respeitado; a regra memorizada só serve de sugestão no ecrã.
+            val candidate=value
+            val staleRuleKey=if(current?.kind=="Despesa"&&current.budgetId!=null&&value.kind=="Despesa"&&value.budgetId==null&&ruleKey.isNotBlank())
+                dao.budgetRule(ruleKey)?.takeIf{it.budgetId==current.budgetId}?.merchantKey else null
             val budget = candidate.budgetId?.let { dao.budgetById(it) }
             val validBudget = when (candidate.kind) {
                 "Despesa" -> candidate.budgetId == null || budget != null
@@ -125,7 +127,7 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
                 )
                 val rule=if(rememberBudgetRule&&normalized.kind=="Despesa"&&normalized.budgetId!=null&&ruleKey.isNotBlank())
                     BudgetRule(ruleKey,normalized.title,normalized.budgetId) else null
-                dao.saveTransactionAndRule(normalized,rule)
+                dao.saveTransactionAndRule(normalized,rule,staleRuleKey)
                 true
             }
         } catch (cancelled: CancellationException) { throw cancelled } catch (_: Exception) { false }

@@ -73,10 +73,12 @@ data class BudgetPeriod(val budgetId: Long, val monthStart: Long, val limitAmoun
     @Insert suspend fun addTransaction(value: FinanceTransaction)
     @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun importTransactions(values: List<FinanceTransaction>): List<Long>
     @Update suspend fun updateTransaction(value: FinanceTransaction)
-    @Transaction suspend fun saveTransactionAndRule(value: FinanceTransaction, rule: BudgetRule?) {
+    @Transaction suspend fun saveTransactionAndRule(value: FinanceTransaction, rule: BudgetRule?, deleteRuleKey: String? = null) {
         if (value.id == 0L) addTransaction(value) else updateTransaction(value)
+        if (deleteRuleKey != null) deleteBudgetRule(deleteRuleKey)
         if (rule != null) saveBudgetRule(rule)
     }
+    @Query("DELETE FROM budget_rules WHERE merchantKey = :merchantKey") suspend fun deleteBudgetRule(merchantKey: String)
     @Transaction suspend fun applyClassificationChanges(
         budgetUpdates: List<FinanceTransaction>,
         incomeUpdates: List<FinanceTransaction>,
