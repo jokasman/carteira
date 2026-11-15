@@ -72,6 +72,8 @@ data class BudgetKeyword(@PrimaryKey(autoGenerate = true) val id: Long = 0, val 
     @Query("SELECT * FROM transactions ORDER BY date DESC, id DESC") fun transactions(): Flow<List<FinanceTransaction>>
     @Query("SELECT * FROM transactions WHERE id = :id LIMIT 1") suspend fun transactionById(id: Long): FinanceTransaction?
     @Query("SELECT * FROM transactions WHERE id IN (:ids)") suspend fun transactionsByIds(ids: List<Long>): List<FinanceTransaction>
+    @Query("SELECT * FROM transactions WHERE (accountId = :accountId OR toAccountId = :accountId) AND date >= :from") suspend fun accountTransactionsSince(accountId: Long, from: Long): List<FinanceTransaction>
+    @Query("SELECT MAX(date) FROM transactions WHERE accountId = :accountId OR toAccountId = :accountId") suspend fun latestAccountMovementDate(accountId: Long): Long?
     @Query("SELECT * FROM transactions WHERE settlementRevenueId = :incomeId ORDER BY date, id") suspend fun settlementExpenses(incomeId: Long): List<FinanceTransaction>
     @Query("SELECT * FROM budgets ORDER BY name") fun budgets(): Flow<List<Budget>>
     @Query("SELECT * FROM budgets ORDER BY id") suspend fun allBudgets(): List<Budget>

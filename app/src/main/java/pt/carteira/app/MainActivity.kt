@@ -189,6 +189,79 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
         } catch(cancelled:CancellationException){throw cancelled}
         catch(error:Exception){onComplete(null,error.message?:"Não foi possível importar o CSV.")}
     }
+    internal fun syncBank(context:android.content.Context,accountId:Long,uid:String,onComplete:(BankSyncResult?,String?)->Unit)=viewModelScope.launch {
+        try {
+            if(dao.accountById(accountId)==null) error("Seleciona uma conta válida.")
+            val last=bankLastSync(context,accountId)
+            val latest=dao.latestAccountMovementDate(accountId)
+            // 1.ª vez: desde o próprio dia do último movimento da conta (ex.: último do CSV). Depois: última sincronização menos 5 dias.
+            val fromDay=when{
+                last!=null->bankDayKey((bankDayToMillis(last)?:System.currentTimeMillis())-5L*86400000)
+                latest!=null->bankDayKey(latest)
+                else->bankDayKey(System.currentTimeMillis()-90L*86400000)
+            }
+            val token=bankDeviceToken(context)
+            val incoming=withContext(Dispatchers.IO){fetchBankTransactions(token,uid,fromDay)}
+            val existing=dao.accountTransactionsSince(accountId,bankDayToMillis(fromDay)?:0L)
+            fun cents(value:Double)=BigDecimal.valueOf(kotlin.math.abs(value)).setScale(2,RoundingMode.HALF_UP).movePointRight(2).toLong()
+            fun signedCents(t:FinanceTransaction):Long{
+                val c=cents(t.amount)
+                return when(t.kind){"Despesa"->-c;"Receita"->c;"Transferência"->if(t.accountId==accountId)-c else c;else->if(t.amount<0)-c else c}
+            }
+            val existingKeys=existing.mapNotNull{it.importKey}.toSet()
+            val counts=HashMap<Pair<String,Long>,Int>()
+            existing.forEach{val k=bankDayKey(it.date) to signedCents(it);counts[k]=(counts[k]?:0)+1}
+            val occurrences=HashMap<String,Int>()
+            data class Prepared(val tx:BankTransaction,val signed:Long,val key:String)
+            val prepared=incoming.map{t->
+                val signed=if(t.amount<0)-cents(t.amount) else cents(t.amount)
+                val base=t.id?:"${t.date}|$signed|${normalizeMovementKey(t.description)}"
+                val n=(occurrences[base]?:0)+1;occurrences[base]=n
+                val digest=java.security.MessageDigest.getInstance("SHA-256").digest("$base|$n".toByteArray(Charsets.UTF_8)).joinToString(""){"%02x".format(it.toInt() and 0xff)}
+                Prepared(t,signed,"eb:$uid:$digest")
+            }
+            var duplicates=0
+            val remaining=prepared.filter{p->
+                if(p.key in existingKeys){
+                    duplicates++
+                    val k=p.tx.date to p.signed;counts[k]=((counts[k]?:1)-1).coerceAtLeast(0)
+                    false
+                } else true
+            }
+            val fresh=remaining.filter{p->
+                val k=p.tx.date to p.signed
+                val available=counts[k]?:0
+                if(available>0){counts[k]=available-1;duplicates++;false} else true
+            }
+            val rules=dao.allBudgetRules().associateBy{it.merchantKey}
+            val allBudgets=dao.allBudgets().associateBy{it.id}
+            val closedMonths=dao.allBudgetClosures().map{it.budgetId to it.monthStart}.toSet()
+            val keywords=dao.allBudgetKeywords()
+            val rows=fresh.map{p->
+                val date=bankDayToMillis(p.tx.date)!!
+                val expense=p.signed<0
+                val month=currentMonthStart(date)
+                fun usable(id:Long)=allBudgets[id]?.let{b->budgetVisibleInMonth(b,month)&&(b.id to month) !in closedMonths}==true
+                val ruleBudget=if(expense)rules[normalizeMovementKey(p.tx.description)]?.budgetId?.takeIf{usable(it)} else null
+                val budgetId=ruleBudget?:(if(expense)keywordBudgetFor(p.tx.description,keywords,::usable) else null)
+                FinanceTransaction(
+                    title=p.tx.description,
+                    amount=kotlin.math.abs(p.signed)/100.0,
+                    kind=if(expense)"Despesa" else "Receita",
+                    category=if(expense)"Outros" else "Outros rendimentos",
+                    accountId=accountId,
+                    date=date,
+                    budgetId=budgetId,
+                    importKey=p.key
+                )
+            }
+            val results=if(rows.isEmpty()) emptyList() else dao.importTransactions(rows)
+            val inserted=results.indices.filter{results[it]>=0L}
+            setBankLastSync(context,accountId,bankDayKey(System.currentTimeMillis()))
+            onComplete(BankSyncResult(inserted.size,duplicates+results.count{it<0L},inserted.count{rows[it].kind=="Despesa"&&rows[it].budgetId==null},fromDay),null)
+        } catch(cancelled:CancellationException){throw cancelled}
+        catch(error:Exception){onComplete(null,error.message?:"Não foi possível sincronizar com o banco.")}
+    }
     private fun csvImportKey(accountId:Long,movement:BankCsvMovement,merchantKey:String):String {
         val identity="$accountId|${movement.date}|$merchantKey|${movement.signedAmount}|${movement.balance ?: ""}|${movement.occurrence}"
         val digest=java.security.MessageDigest.getInstance("SHA-256").digest(identity.toByteArray(Charsets.UTF_8))
@@ -541,6 +614,7 @@ class MainActivity : ComponentActivity() {
     val context=LocalContext.current
     val prefs=remember{context.getSharedPreferences("carteira_prefs",android.content.Context.MODE_PRIVATE)}
     var activeAccountId by remember{mutableLongStateOf(prefs.getLong("active_account_id",0L))}
+    var bankDialogAccount by remember{mutableStateOf<Account?>(null)}
     val activeAccount=accounts.firstOrNull{it.id==activeAccountId}?:accounts.firstOrNull()
     val accountTx=remember(transactions,activeAccount?.id){
         activeAccount?.let{a->transactions.filter{it.accountId==a.id||it.toAccountId==a.id}}?:transactions
@@ -711,7 +785,7 @@ class MainActivity : ComponentActivity() {
         when(section) {
             "Início" -> HomePage(Modifier.padding(pad), total, transactions, accounts, budgets, budgetPeriods, {section=it}, {pendingDelete=it}, {editMovement(it)}, {addMovement()}, {budget->activeBudgetId=budget.id;selectedBudgetMonth=currentMonthStart();section="DetalheOrçamento"})
             "Movimentos" -> TransactionsPage(Modifier.padding(pad), accountTx, accounts, budgets, closedKeys, selectedMovementIds, {selectedMovementIds=it}, {pendingBulkDelete=it}, {pendingBudgetAssignment=it;dialog="atribuir-orçamento"}, {editMovement(it)}, {addMovement()}, {openCsvPicker()}, {openClassificationPicker()}, {requestMovementClassification(it)}, {pendingSettlementIncome=it;dialog="liquidar-receita"}, {pendingSettlementDetails=it;dialog="ver-liquidacao"})
-            "Contas" -> AccountsPage(Modifier.padding(pad), accounts, transactions, activeAccount?.id, {account->activeAccountId=account.id;prefs.edit().putLong("active_account_id",account.id).apply();selectedMovementIds=emptySet()}, {pendingAccountEdit=null;dialog="conta"}, {pendingAccountEdit=it;dialog="editar-conta"})
+            "Contas" -> AccountsPage(Modifier.padding(pad), accounts, transactions, activeAccount?.id, {account->activeAccountId=account.id;prefs.edit().putLong("active_account_id",account.id).apply();selectedMovementIds=emptySet()}, {pendingAccountEdit=null;dialog="conta"}, {pendingAccountEdit=it;dialog="editar-conta"}, {bankDialogAccount=it})
             "Orçamentos" -> BudgetsPage(Modifier.padding(pad), budgets, closedKeys, accountTx, budgetPeriods, selectedBudgetMonth, {selectedBudgetMonth=it}, budgetSort, showClosedBudgets, showArchivedBudgets, {showClosedBudgets=it}, {pendingBudgetLimit=null;pendingBudgetEdit=null;dialog="orçamento"}, {budget->addMovement(budget.id)}, {budget->activeBudgetId=budget.id;section="DetalheOrçamento"}, {budget,closed->model.setBudgetClosed(budget.id,selectedBudgetMonth,closed)})
             "DetalheOrçamento" -> BudgetDetailPage(Modifier.padding(pad), activeBudget, activeBudget?.let{(it.id to selectedBudgetMonth) in closedKeys}?:false, {budget,closed->model.setBudgetClosed(budget.id,selectedBudgetMonth,closed)}, accountTx, accounts, budgetPeriods, selectedBudgetMonth, {selectedBudgetMonth=it}, {addMovement(activeBudget?.id)}, {pendingDelete=it}, {editMovement(it)}, {budget,monthStart,amount->pendingBudgetLimit=BudgetLimitTarget(budget.id,monthStart,amount);dialog="budget-limit"}, {budget->pendingBudgetEdit=budget;dialog="editar-orçamento"}, {budget->archiveFromMonth=selectedBudgetMonth;pendingBudgetArchive=budget}, {budget->model.unarchiveBudget(budget.id)}, budgetKeywords.filter{it.budgetId==activeBudget?.id}, {text->activeBudget?.let{model.addBudgetKeyword(it.id,text)}}, {keyword->model.removeBudgetKeyword(keyword.id)})
             else -> ReportsPage(Modifier.padding(pad), transactions)
@@ -772,6 +846,7 @@ class MainActivity : ComponentActivity() {
             dismissButton={TextButton(enabled=!undoing,onClick={pendingUndoSettlement=null;dialog=""}){Text("Cancelar",color=Muted)}}
         )
     }
+    bankDialogAccount?.let{account->BankDialog(account,model){bankDialogAccount=null}}
     pendingBudgetArchive?.let { budget ->
         val affected=transactions.count{it.kind=="Despesa"&&it.budgetId==budget.id&&currentMonthStart(it.date)>=archiveFromMonth}
         AlertDialog(
@@ -1068,7 +1143,7 @@ class MainActivity : ComponentActivity() {
     }
     if(showDateFilter) DateFilterDialog(dateFrom,dateTo,{from,to->dateFrom=from;dateTo=to;showDateFilter=false},{dateFrom=null;dateTo=null;showDateFilter=false},{showDateFilter=false})
 }
-@Composable private fun AccountsPage(modifier:Modifier,accounts:List<Account>,tx:List<FinanceTransaction>,activeId:Long?,select:(Account)->Unit,add:()->Unit,edit:(Account)->Unit){
+@Composable private fun AccountsPage(modifier:Modifier,accounts:List<Account>,tx:List<FinanceTransaction>,activeId:Long?,select:(Account)->Unit,add:()->Unit,edit:(Account)->Unit,bank:(Account)->Unit){
     Column(modifier.fillMaxSize().padding(20.dp).verticalScroll(rememberScrollState())){
         Row(verticalAlignment=Alignment.CenterVertically){
             Text("Contas e carteiras",Modifier.weight(1f),style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold,color=Ink)
@@ -1076,10 +1151,10 @@ class MainActivity : ComponentActivity() {
         }
         Text("Toca numa conta para a pôr em vigor. Movimentos e Orçamentos mostram apenas a conta em vigor.",color=Muted,style=MaterialTheme.typography.bodySmall)
         Spacer(Modifier.height(8.dp))
-        accounts.forEach{account->AccountDetail(account,tx,account.id==activeId,{select(account)}){edit(account)};Spacer(Modifier.height(10.dp))}
+        accounts.forEach{account->AccountDetail(account,tx,account.id==activeId,{select(account)},{bank(account)}){edit(account)};Spacer(Modifier.height(10.dp))}
     }
 }
-@Composable private fun AccountDetail(a:Account,tx:List<FinanceTransaction>,active:Boolean,select:()->Unit,edit:()->Unit){
+@Composable private fun AccountDetail(a:Account,tx:List<FinanceTransaction>,active:Boolean,select:()->Unit,bank:()->Unit,edit:()->Unit){
     val bal=accountBalance(a,tx)
     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(if(active)Mint else Color.White).border(if(active)2.dp else 0.dp,if(active)Green else Color.Transparent,RoundedCornerShape(18.dp)).clickable(onClick=select).padding(start=18.dp,top=12.dp,bottom=12.dp,end=8.dp),verticalAlignment=Alignment.CenterVertically){
         Icon(if(active)Icons.Default.CheckCircle else Icons.Default.AccountBalanceWallet,null,tint=Green,modifier=Modifier.size(40.dp))
@@ -1088,8 +1163,105 @@ class MainActivity : ComponentActivity() {
             Text(if(active)"${a.type} · Em vigor" else a.type,color=if(active)Green else Muted,style=MaterialTheme.typography.bodySmall,fontWeight=if(active)FontWeight.SemiBold else FontWeight.Normal)
         }
         Text(money(bal),color=Ink,fontWeight=FontWeight.Bold)
+        IconButton(onClick=bank){Icon(Icons.Default.AccountBalance,"Ligação ao banco",tint=Green)}
         IconButton(onClick=edit){Icon(Icons.Default.Edit,"Editar conta",tint=Green)}
     }
+}
+
+@Composable private fun BankDialog(account:Account,model:FinanceModel,close:()->Unit){
+    val context=LocalContext.current
+    val scope=rememberCoroutineScope()
+    var linked by remember{mutableStateOf(bankLinkedUid(context,account.id))}
+    var lastSync by remember{mutableStateOf(bankLastSync(context,account.id))}
+    var step by remember{mutableStateOf(if(linked==null)"inicio" else "ligada")}
+    var banks by remember{mutableStateOf<List<String>>(emptyList())}
+    var bankAccounts by remember{mutableStateOf<List<BankAccountInfo>>(emptyList())}
+    var query by remember{mutableStateOf("")}
+    var busy by remember{mutableStateOf(false)}
+    var message by remember{mutableStateOf("")}
+    fun loadAccounts(){
+        busy=true;message="";step="contas"
+        scope.launch{
+            try{
+                bankAccounts=withContext(Dispatchers.IO){fetchBankAccounts(bankDeviceToken(context))}
+                if(bankAccounts.isEmpty()) message="Ainda não há contas autorizadas. Toca em Autorizar banco."
+            }catch(e:Exception){message=e.message?:"Não foi possível obter as contas."}
+            busy=false
+        }
+    }
+    fun loadBanks(){
+        busy=true;message="";step="bancos"
+        scope.launch{
+            try{banks=withContext(Dispatchers.IO){fetchBanks("PT")}}catch(e:Exception){message=e.message?:"Não foi possível obter a lista de bancos."}
+            busy=false
+        }
+    }
+    AlertDialog(
+        onDismissRequest={if(!busy)close()},
+        title={Text("Banco · ${account.name}",color=Ink,fontWeight=FontWeight.Bold)},
+        text={Column(Modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(8.dp)){
+            when(step){
+                "ligada"->{
+                    Text("Esta conta está ligada ao banco.",color=Ink)
+                    Text(lastSync?.let{"Última sincronização: $it"}?:"Ainda não sincronizada. A primeira vez traz os movimentos desde o dia do último movimento desta conta.",color=Muted,style=MaterialTheme.typography.bodySmall)
+                    Button(onClick={
+                        val uid=linked
+                        if(uid!=null){
+                        busy=true;message=""
+                        model.syncBank(context,account.id,uid){result,error->
+                            busy=false
+                            if(result!=null){
+                                lastSync=bankLastSync(context,account.id)
+                                message="${result.imported} movimento(s) novo(s) desde ${result.dateFrom}. ${result.duplicates} repetido(s) ignorado(s)."+(if(result.unassignedExpenses>0)" ${result.unassignedExpenses} despesa(s) ficaram por classificar." else "")
+                            } else message=error?:"Não foi possível sincronizar."
+                        }
+                        }
+                    },enabled=!busy,modifier=Modifier.fillMaxWidth()){Icon(Icons.Default.Sync,null);Spacer(Modifier.width(6.dp));Text("Sincronizar agora")}
+                    TextButton(onClick={loadAccounts()},enabled=!busy){Text("Mudar conta do banco",color=Green)}
+                    TextButton(onClick={setBankLinkedUid(context,account.id,null);linked=null;lastSync=null;step="inicio";message=""},enabled=!busy){Text("Desligar do banco",color=Coral)}
+                }
+                "inicio"->{
+                    Text("1. Toca em Autorizar banco, escolhe o banco e autoriza no site do banco.",color=Ink)
+                    Text("2. Volta a esta janela e escolhe a conta do banco que corresponde a ${account.name}.",color=Ink)
+                    Button(onClick={loadBanks()},enabled=!busy,modifier=Modifier.fillMaxWidth()){Text("Autorizar banco")}
+                    OutlinedButton(onClick={loadAccounts()},enabled=!busy,modifier=Modifier.fillMaxWidth()){Text("Já autorizei: escolher conta")}
+                }
+                "bancos"->{
+                    OutlinedTextField(query,{query=it},label={Text("Procurar banco")},singleLine=true,modifier=Modifier.fillMaxWidth())
+                    banks.filter{query.isBlank()||it.contains(query.trim(),ignoreCase=true)}.take(40).forEach{name->
+                        TextButton(onClick={
+                            busy=true;message=""
+                            scope.launch{
+                                try{
+                                    val url=withContext(Dispatchers.IO){startBankLink(bankDeviceToken(context),name,"PT")}
+                                    context.startActivity(Intent(Intent.ACTION_VIEW,Uri.parse(url)))
+                                    step="contas";bankAccounts=emptyList()
+                                    message="Depois de autorizares no banco, volta aqui e toca em Atualizar."
+                                }catch(e:Exception){message=e.message?:"Não foi possível iniciar a autorização."}
+                                busy=false
+                            }
+                        },enabled=!busy,modifier=Modifier.fillMaxWidth()){Text(name,color=Ink,modifier=Modifier.fillMaxWidth())}
+                    }
+                    TextButton(onClick={step=if(linked==null)"inicio" else "ligada"}){Text("Voltar",color=Muted)}
+                }
+                "contas"->{
+                    Text("Escolhe a conta do banco que corresponde a ${account.name}:",color=Ink)
+                    bankAccounts.forEach{a->
+                        OutlinedButton(onClick={setBankLinkedUid(context,account.id,a.uid);linked=a.uid;lastSync=bankLastSync(context,account.id);step="ligada";message="Conta ligada. Toca em Sincronizar agora."},enabled=!busy,modifier=Modifier.fillMaxWidth()){
+                            Text("${a.aspsp} · ${a.name}"+(a.iban?.let{" · ••••"+it.takeLast(4)}?:""),color=Ink)
+                        }
+                    }
+                    Row{
+                        TextButton(onClick={loadAccounts()},enabled=!busy){Text("Atualizar",color=Green)}
+                        TextButton(onClick={loadBanks()},enabled=!busy){Text("Autorizar banco",color=Green)}
+                    }
+                }
+            }
+            if(busy) LinearProgressIndicator(Modifier.fillMaxWidth(),color=Green)
+            if(message.isNotBlank()) Text(message,color=Muted,style=MaterialTheme.typography.bodySmall)
+        }},
+        confirmButton={TextButton(onClick=close,enabled=!busy){Text("Fechar",color=Green)}}
+    )
 }
 
 @Composable private fun BudgetsPage(
@@ -1308,7 +1480,7 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
             Text(t.title.ifBlank{t.kind},color=if(t.active)Ink else Muted,fontWeight=FontWeight.SemiBold)
             Row(Modifier.fillMaxWidth().padding(top=2.dp),verticalAlignment=Alignment.Top){
             Column(Modifier.weight(1f).padding(end=8.dp)){
-            val details=listOfNotNull(budgetLabel,if(t.recurring)"Recorrente" else null,if(t.importedFromCsv||t.importKey!=null)"CSV" else null,if(!t.active)"Inativo" else null,settlementIncomeTitle?.let{"Liquidada com $it"})
+            val details=listOfNotNull(budgetLabel,if(t.recurring)"Recorrente" else null,when{t.importKey?.startsWith("eb:")==true->"Banco";t.importedFromCsv||t.importKey!=null->"CSV";else->null},if(!t.active)"Inativo" else null,settlementIncomeTitle?.let{"Liquidada com $it"})
             Text(details.joinToString(" · "),color=if(t.active&&t.kind=="Despesa"&&t.budgetId==null)Coral else Muted,style=MaterialTheme.typography.labelSmall,maxLines=1)
             if(t.kind=="Despesa"&&t.budgetId==null&&assignBudget!=null) TextButton(
                 onClick={assignBudget(t)},contentPadding=PaddingValues(horizontal=0.dp,vertical=0.dp),modifier=Modifier.height(30.dp)

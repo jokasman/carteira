@@ -15,8 +15,8 @@ android {
         applicationId = "pt.jokasman.carteira"
         minSdk = 26
         targetSdk = 35
-        versionCode = 22
-        versionName = "1.5.0"
+        versionCode = 23
+        versionName = "1.6.0"
     }
     buildFeatures { compose = true }
     compileOptions {
