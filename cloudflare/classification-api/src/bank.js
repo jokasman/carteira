@@ -233,29 +233,49 @@ async function transactions(request, env) {
   if (!(await deviceAccounts(hash, env)).some((a) => a.uid === uid)) throw bad("Esta conta não está ligada a este dispositivo.", 403);
   const today = new Date().toISOString().slice(0, 10);
   let dateFrom = /^\d{4}-\d{2}-\d{2}$/.test(body.dateFrom || "") ? body.dateFrom : new Date(Date.now() - 90 * 86400000).toISOString().slice(0, 10);
-  // A Enable Banking recusa datas futuras (ex.: movimentos com data-valor no futuro).
+  // A Enable Banking recusa datas de início futuras (ex.: movimentos com data-valor no futuro).
   if (dateFrom > today) dateFrom = today;
+  // Movimentos do fim de semana podem ter data de lançamento futura (ex.: segunda-feira).
+  const dateTo = new Date(Date.now() + 10 * 86400000).toISOString().slice(0, 10);
+  // Indica que o titular está presente (pedido feito por ele na app), para não contar no limite diário de acessos em segundo plano.
+  const psuHeaders = {};
+  const ip = request.headers.get("CF-Connecting-IP");
+  if (ip) psuHeaders["Psu-Ip-Address"] = ip;
+  psuHeaders["Psu-User-Agent"] = (request.headers.get("User-Agent") || "Carteira Android").slice(0, 200);
   const out = [];
+  const statuses = {};
+  let raw = 0;
+  let useDateTo = true;
   let continuation = null;
   for (let page = 0; page < 30; page++) {
-    const query = "?date_from=" + dateFrom + (continuation ? "&continuation_key=" + encodeURIComponent(continuation) : "");
-    const data = await ebFetch(env, "/accounts/" + encodeURIComponent(uid) + "/transactions" + query, { method: "GET" });
+    const query = "?date_from=" + dateFrom + (useDateTo ? "&date_to=" + dateTo : "") + (continuation ? "&continuation_key=" + encodeURIComponent(continuation) : "");
+    let data;
+    try {
+      data = await ebFetch(env, "/accounts/" + encodeURIComponent(uid) + "/transactions" + query, { method: "GET", headers: psuHeaders });
+    } catch (e) {
+      if (useDateTo && page === 0 && e.status === 400) { useDateTo = false; page--; continue; }
+      throw e;
+    }
     for (const t of data.transactions || []) {
+      raw++;
       const status = t.status || "BOOK";
+      statuses[status] = (statuses[status] || 0) + 1;
       if (!["BOOK", "PDNG", "HOLD"].includes(status)) continue;
       const amount = Number(t.transaction_amount && t.transaction_amount.amount);
       if (!Number.isFinite(amount) || amount === 0) continue;
-      const date = t.status && t.status !== "BOOK" ? (t.transaction_date || t.value_date || t.booking_date) : (t.booking_date || t.value_date || t.transaction_date);
+      // Data do movimento (quando foi feito); a data de lançamento pode ser posterior.
+      const date = t.transaction_date || t.value_date || t.booking_date;
+      const bookingDate = t.booking_date || t.value_date || date;
       if (!date) continue;
       const signed = (t.credit_debit_indicator === "DBIT" ? -1 : 1) * Math.abs(amount);
       const description = describe(t);
       const ref = t.entry_reference || t.transaction_id || null;
-      out.push({ id: ref, date, amount: signed, description, pending: status !== "BOOK" });
+      out.push({ id: ref, date, bookingDate, amount: signed, description, pending: status !== "BOOK" });
     }
     continuation = data.continuation_key;
     if (!continuation) break;
   }
-  return json({ transactions: out });
+  return json({ transactions: out, raw, statuses, dateFrom, dateTo: useDateTo ? dateTo : null });
 }
 
 let schemaReady = false;

@@ -201,8 +201,10 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
                 else->bankDayKey(System.currentTimeMillis()-90L*86400000)
             }.let{day->bankDayKey(System.currentTimeMillis()).let{today->if(day>today)today else day}}
             val token=bankDeviceToken(context)
-            val incoming=withContext(Dispatchers.IO){fetchBankTransactions(token,uid,fromDay)}
-            val existing=dao.accountTransactionsSince(accountId,bankDayToMillis(fromDay)?:0L)
+            val response=withContext(Dispatchers.IO){fetchBankTransactions(token,uid,fromDay)}
+            val incoming=response.transactions
+            // Inclui alguns dias antes para reconhecer repetidos cuja data de movimento difere da data de lançamento.
+            val existing=dao.accountTransactionsSince(accountId,(bankDayToMillis(fromDay)?:0L)-5L*86400000)
             fun cents(value:Double)=BigDecimal.valueOf(kotlin.math.abs(value)).setScale(2,RoundingMode.HALF_UP).movePointRight(2).toLong()
             fun signedCents(t:FinanceTransaction):Long{
                 val c=cents(t.amount)
@@ -212,8 +214,15 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
             val pendingPrefix="ebp:$uid:"
             // Movimentos pendentes já gravados: quando o banco os confirma, atualiza-se a mesma linha (mantém o orçamento escolhido).
             val pendingRows=existing.filter{it.importKey?.startsWith(pendingPrefix)==true}.toMutableList()
-            val counts=HashMap<Pair<String,Long>,Int>()
-            existing.filter{it.importKey?.startsWith(pendingPrefix)!=true}.forEach{val k=bankDayKey(it.date) to signedCents(it);counts[k]=(counts[k]?:0)+1}
+            // Movimentos já existentes (CSV, manuais ou do banco) por valor; cada um só pode corresponder a um movimento do banco.
+            val pool=existing.filter{it.importKey?.startsWith(pendingPrefix)!=true}.groupBy({signedCents(it)},{it}).mapValues{it.value.toMutableList()}.toMutableMap()
+            fun consume(signed:Long,days:List<Long>,keyMatch:String?=null):Boolean{
+                val list=pool[signed]?:return false
+                val candidate=(keyMatch?.let{k->list.firstOrNull{it.importKey==k}})
+                    ?:list.filter{r->days.any{d->kotlin.math.abs(r.date-d)<=4L*86400000}}.minByOrNull{r->days.minOf{d->kotlin.math.abs(r.date-d)}}
+                    ?:return false
+                list.remove(candidate);return true
+            }
             val occurrences=HashMap<String,Int>()
             data class Prepared(val tx:BankTransaction,val signed:Long,val key:String)
             val prepared=incoming.map{t->
@@ -228,7 +237,7 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
             val remaining=prepared.filter{p->
                 if(p.key in existingKeys){
                     duplicates++
-                    if(!p.tx.pending){val k=p.tx.date to p.signed;counts[k]=((counts[k]?:1)-1).coerceAtLeast(0)}
+                    if(!p.tx.pending) consume(p.signed,emptyList(),p.key)
                     else pendingRows.removeAll{it.importKey==p.key}
                     false
                 } else true
@@ -244,9 +253,8 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
                         return@filter false
                     }
                 }
-                val k=p.tx.date to p.signed
-                val available=counts[k]?:0
-                if(available>0){counts[k]=available-1;duplicates++;false} else true
+                val days=listOfNotNull(bankDayToMillis(p.tx.date),bankDayToMillis(p.tx.bookingDate)).distinct()
+                if(consume(p.signed,days)){duplicates++;false} else true
             }
             val rules=dao.allBudgetRules().associateBy{it.merchantKey}
             val allBudgets=dao.allBudgets().associateBy{it.id}
@@ -273,7 +281,7 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
             val results=if(rows.isEmpty()) emptyList() else dao.importTransactions(rows)
             val inserted=results.indices.filter{results[it]>=0L}
             setBankLastSync(context,accountId,bankDayKey(System.currentTimeMillis()))
-            onComplete(BankSyncResult(inserted.size,duplicates+results.count{it<0L},inserted.count{rows[it].kind=="Despesa"&&rows[it].budgetId==null},fromDay,inserted.count{rows[it].importKey?.startsWith("ebp:")==true},confirmed),null)
+            onComplete(BankSyncResult(inserted.size,duplicates+results.count{it<0L},inserted.count{rows[it].kind=="Despesa"&&rows[it].budgetId==null},fromDay,inserted.count{rows[it].importKey?.startsWith("ebp:")==true},confirmed,incoming.size,response.raw),null)
         } catch(cancelled:CancellationException){throw cancelled}
         catch(error:Exception){onComplete(null,error.message?:"Não foi possível sincronizar com o banco.")}
     }
@@ -1227,7 +1235,7 @@ class MainActivity : ComponentActivity() {
                             busy=false
                             if(result!=null){
                                 lastSync=bankLastSync(context,account.id)
-                                message="${result.imported} movimento(s) novo(s) desde ${result.dateFrom}"+(if(result.pending>0)" (${result.pending} pendente(s))" else "")+". ${result.duplicates} repetido(s) ignorado(s)."+(if(result.confirmed>0)" ${result.confirmed} pendente(s) confirmado(s) pelo banco." else "")+(if(result.unassignedExpenses>0)" ${result.unassignedExpenses} despesa(s) ficaram por classificar." else "")
+                                message="O banco devolveu ${result.raw} movimento(s) desde ${result.dateFrom}. ${result.imported} novo(s)"+(if(result.pending>0)" (${result.pending} pendente(s))" else "")+". ${result.duplicates} repetido(s) ignorado(s)."+(if(result.confirmed>0)" ${result.confirmed} pendente(s) confirmado(s) pelo banco." else "")+(if(result.unassignedExpenses>0)" ${result.unassignedExpenses} despesa(s) ficaram por classificar." else "")
                             } else message=error?:"Não foi possível sincronizar."
                         }
                         }

@@ -14,8 +14,8 @@ import java.util.Locale
 internal const val BANK_API_BASE = "https://carteira-classificacao.faint-foxtail.workers.dev"
 
 internal data class BankAccountInfo(val uid: String, val iban: String?, val name: String, val aspsp: String, val validUntil: String?)
-internal data class BankTransaction(val id: String?, val date: String, val amount: Double, val description: String, val pending: Boolean = false)
-internal data class BankSyncResult(val imported: Int, val duplicates: Int, val unassignedExpenses: Int, val dateFrom: String, val pending: Int = 0, val confirmed: Int = 0)
+internal data class BankTransaction(val id: String?, val date: String, val amount: Double, val description: String, val pending: Boolean = false, val bookingDate: String = date)
+internal data class BankSyncResult(val imported: Int, val duplicates: Int, val unassignedExpenses: Int, val dateFrom: String, val pending: Int = 0, val confirmed: Int = 0, val received: Int = 0, val raw: Int = 0)
 
 private const val PREFS = "carteira_prefs"
 
@@ -94,13 +94,17 @@ internal fun fetchBankAccounts(deviceToken: String): List<BankAccountInfo> {
     }
 }
 
-internal fun fetchBankTransactions(deviceToken: String, uid: String, dateFrom: String): List<BankTransaction> {
-    val list = request("/api/bank/transactions", "POST", JSONObject().put("deviceToken", deviceToken).put("accountUid", uid).put("dateFrom", dateFrom)).optJSONArray("transactions") ?: JSONArray()
-    return (0 until list.length()).mapNotNull { index ->
+internal data class BankTransactionsResponse(val transactions: List<BankTransaction>, val raw: Int)
+
+internal fun fetchBankTransactions(deviceToken: String, uid: String, dateFrom: String): BankTransactionsResponse {
+    val response = request("/api/bank/transactions", "POST", JSONObject().put("deviceToken", deviceToken).put("accountUid", uid).put("dateFrom", dateFrom))
+    val list = response.optJSONArray("transactions") ?: JSONArray()
+    return BankTransactionsResponse((0 until list.length()).mapNotNull { index ->
         val t = list.optJSONObject(index) ?: return@mapNotNull null
         val amount = t.optDouble("amount", Double.NaN)
         val date = t.optString("date")
         if (!amount.isFinite() || amount == 0.0 || bankDayToMillis(date) == null) return@mapNotNull null
-        BankTransaction(t.optString("id").takeIf { it.isNotBlank() && it != "null" }, date, amount, t.optString("description").ifBlank { "Movimento" }, t.optBoolean("pending", false))
-    }
+        val booking = t.optString("bookingDate").takeIf { bankDayToMillis(it) != null } ?: date
+        BankTransaction(t.optString("id").takeIf { it.isNotBlank() && it != "null" }, date, amount, t.optString("description").ifBlank { "Movimento" }, t.optBoolean("pending", false), booking)
+    }, response.optInt("raw", list.length()))
 }
