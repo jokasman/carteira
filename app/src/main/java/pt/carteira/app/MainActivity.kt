@@ -695,7 +695,7 @@ class MainActivity : ComponentActivity() {
                     DropdownMenuItem(text={Text("Mostrar fechados")},leadingIcon={Checkbox(showClosedBudgets,null)},onClick={showClosedBudgets=!showClosedBudgets})
                     DropdownMenuItem(text={Text("Mostrar arquivados")},leadingIcon={Checkbox(showArchivedBudgets,null)},onClick={showArchivedBudgets=!showArchivedBudgets})
                 }
-            } else if(section!="DetalheOrçamento"||canAddBudgetMovement) IconButton(onClick={addMovement(if(section=="DetalheOrçamento")activeBudgetId else null)}) { Icon(Icons.Default.Add, "Novo movimento", tint=Green) }
+            } else if(section!="DetalheOrçamento") IconButton(onClick={addMovement(if(section=="DetalheOrçamento")activeBudgetId else null)}) { Icon(Icons.Default.Add, "Novo movimento", tint=Green) }
         }
     }, bottomBar={ NavigationBar(containerColor=Color.White) {
         listOf("Início" to Icons.Default.Home, "Movimentos" to Icons.Default.ReceiptLong, "Orçamentos" to Icons.Default.PieChart, "Contas" to Icons.Default.AccountBalanceWallet, "Relatórios" to Icons.Default.BarChart).forEach { (label, icon) ->
@@ -1186,7 +1186,6 @@ class MainActivity : ComponentActivity() {
             if(canAdd) EmptyCard("Ainda sem registos","As despesas associadas a este orçamento aparecem aqui.","Adicionar movimento",add)
             else Text("Sem registos neste mês.",color=Muted,modifier=Modifier.padding(vertical=16.dp))
         } else LazyColumn(Modifier.weight(1f),verticalArrangement=Arrangement.spacedBy(8.dp)){items(records,key={it.id}){TransactionRow(it,accounts,requestDelete,requestEdit,listOf(budget))}}
-        if(canAdd) Button(onClick=add,modifier=Modifier.fillMaxWidth().padding(vertical=10.dp)){Icon(Icons.Default.Add,null);Spacer(Modifier.width(8.dp));Text("Adicionar movimento")}
     }
 }
 
