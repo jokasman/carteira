@@ -209,26 +209,41 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
                 return when(t.kind){"Despesa"->-c;"Receita"->c;"Transferência"->if(t.accountId==accountId)-c else c;else->if(t.amount<0)-c else c}
             }
             val existingKeys=existing.mapNotNull{it.importKey}.toSet()
+            val pendingPrefix="ebp:$uid:"
+            // Movimentos pendentes já gravados: quando o banco os confirma, atualiza-se a mesma linha (mantém o orçamento escolhido).
+            val pendingRows=existing.filter{it.importKey?.startsWith(pendingPrefix)==true}.toMutableList()
             val counts=HashMap<Pair<String,Long>,Int>()
-            existing.forEach{val k=bankDayKey(it.date) to signedCents(it);counts[k]=(counts[k]?:0)+1}
+            existing.filter{it.importKey?.startsWith(pendingPrefix)!=true}.forEach{val k=bankDayKey(it.date) to signedCents(it);counts[k]=(counts[k]?:0)+1}
             val occurrences=HashMap<String,Int>()
             data class Prepared(val tx:BankTransaction,val signed:Long,val key:String)
             val prepared=incoming.map{t->
                 val signed=if(t.amount<0)-cents(t.amount) else cents(t.amount)
-                val base=t.id?:"${t.date}|$signed|${normalizeMovementKey(t.description)}"
+                val base=(if(t.pending)"P|" else "")+(t.id?:"${t.date}|$signed|${normalizeMovementKey(t.description)}")
                 val n=(occurrences[base]?:0)+1;occurrences[base]=n
                 val digest=java.security.MessageDigest.getInstance("SHA-256").digest("$base|$n".toByteArray(Charsets.UTF_8)).joinToString(""){"%02x".format(it.toInt() and 0xff)}
-                Prepared(t,signed,"eb:$uid:$digest")
+                Prepared(t,signed,(if(t.pending)"ebp:" else "eb:")+"$uid:$digest")
             }
             var duplicates=0
+            var confirmed=0
             val remaining=prepared.filter{p->
                 if(p.key in existingKeys){
                     duplicates++
-                    val k=p.tx.date to p.signed;counts[k]=((counts[k]?:1)-1).coerceAtLeast(0)
+                    if(!p.tx.pending){val k=p.tx.date to p.signed;counts[k]=((counts[k]?:1)-1).coerceAtLeast(0)}
+                    else pendingRows.removeAll{it.importKey==p.key}
                     false
                 } else true
             }
             val fresh=remaining.filter{p->
+                if(!p.tx.pending){
+                    val bookedDay=bankDayToMillis(p.tx.date)!!
+                    val match=pendingRows.filter{r->signedCents(r)==p.signed&&kotlin.math.abs(r.date-bookedDay)<=7L*86400000}.minByOrNull{kotlin.math.abs(it.date-bookedDay)}
+                    if(match!=null){
+                        pendingRows.remove(match)
+                        dao.updateTransaction(match.copy(importKey=p.key,date=bookedDay))
+                        confirmed++
+                        return@filter false
+                    }
+                }
                 val k=p.tx.date to p.signed
                 val available=counts[k]?:0
                 if(available>0){counts[k]=available-1;duplicates++;false} else true
@@ -258,7 +273,7 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
             val results=if(rows.isEmpty()) emptyList() else dao.importTransactions(rows)
             val inserted=results.indices.filter{results[it]>=0L}
             setBankLastSync(context,accountId,bankDayKey(System.currentTimeMillis()))
-            onComplete(BankSyncResult(inserted.size,duplicates+results.count{it<0L},inserted.count{rows[it].kind=="Despesa"&&rows[it].budgetId==null},fromDay),null)
+            onComplete(BankSyncResult(inserted.size,duplicates+results.count{it<0L},inserted.count{rows[it].kind=="Despesa"&&rows[it].budgetId==null},fromDay,inserted.count{rows[it].importKey?.startsWith("ebp:")==true},confirmed),null)
         } catch(cancelled:CancellationException){throw cancelled}
         catch(error:Exception){onComplete(null,error.message?:"Não foi possível sincronizar com o banco.")}
     }
@@ -1212,7 +1227,7 @@ class MainActivity : ComponentActivity() {
                             busy=false
                             if(result!=null){
                                 lastSync=bankLastSync(context,account.id)
-                                message="${result.imported} movimento(s) novo(s) desde ${result.dateFrom}. ${result.duplicates} repetido(s) ignorado(s)."+(if(result.unassignedExpenses>0)" ${result.unassignedExpenses} despesa(s) ficaram por classificar." else "")
+                                message="${result.imported} movimento(s) novo(s) desde ${result.dateFrom}"+(if(result.pending>0)" (${result.pending} pendente(s))" else "")+". ${result.duplicates} repetido(s) ignorado(s)."+(if(result.confirmed>0)" ${result.confirmed} pendente(s) confirmado(s) pelo banco." else "")+(if(result.unassignedExpenses>0)" ${result.unassignedExpenses} despesa(s) ficaram por classificar." else "")
                             } else message=error?:"Não foi possível sincronizar."
                         }
                         }
@@ -1480,7 +1495,7 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
             Text(t.title.ifBlank{t.kind},color=if(t.active)Ink else Muted,fontWeight=FontWeight.SemiBold)
             Row(Modifier.fillMaxWidth().padding(top=2.dp),verticalAlignment=Alignment.Top){
             Column(Modifier.weight(1f).padding(end=8.dp)){
-            val details=listOfNotNull(budgetLabel,if(t.recurring)"Recorrente" else null,when{t.importKey?.startsWith("eb:")==true->"Banco";t.importedFromCsv||t.importKey!=null->"CSV";else->null},if(!t.active)"Inativo" else null,settlementIncomeTitle?.let{"Liquidada com $it"})
+            val details=listOfNotNull(budgetLabel,if(t.recurring)"Recorrente" else null,when{t.importKey?.startsWith("ebp:")==true->"Banco · pendente";t.importKey?.startsWith("eb:")==true->"Banco";t.importedFromCsv||t.importKey!=null->"CSV";else->null},if(!t.active)"Inativo" else null,settlementIncomeTitle?.let{"Liquidada com $it"})
             Text(details.joinToString(" · "),color=if(t.active&&t.kind=="Despesa"&&t.budgetId==null)Coral else Muted,style=MaterialTheme.typography.labelSmall,maxLines=1)
             if(t.kind=="Despesa"&&t.budgetId==null&&assignBudget!=null) TextButton(
                 onClick={assignBudget(t)},contentPadding=PaddingValues(horizontal=0.dp,vertical=0.dp),modifier=Modifier.height(30.dp)

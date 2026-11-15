@@ -14,8 +14,8 @@ import java.util.Locale
 internal const val BANK_API_BASE = "https://carteira-classificacao.faint-foxtail.workers.dev"
 
 internal data class BankAccountInfo(val uid: String, val iban: String?, val name: String, val aspsp: String, val validUntil: String?)
-internal data class BankTransaction(val id: String?, val date: String, val amount: Double, val description: String)
-internal data class BankSyncResult(val imported: Int, val duplicates: Int, val unassignedExpenses: Int, val dateFrom: String)
+internal data class BankTransaction(val id: String?, val date: String, val amount: Double, val description: String, val pending: Boolean = false)
+internal data class BankSyncResult(val imported: Int, val duplicates: Int, val unassignedExpenses: Int, val dateFrom: String, val pending: Int = 0, val confirmed: Int = 0)
 
 private const val PREFS = "carteira_prefs"
 
@@ -101,6 +101,6 @@ internal fun fetchBankTransactions(deviceToken: String, uid: String, dateFrom: S
         val amount = t.optDouble("amount", Double.NaN)
         val date = t.optString("date")
         if (!amount.isFinite() || amount == 0.0 || bankDayToMillis(date) == null) return@mapNotNull null
-        BankTransaction(t.optString("id").takeIf { it.isNotBlank() && it != "null" }, date, amount, t.optString("description").ifBlank { "Movimento" })
+        BankTransaction(t.optString("id").takeIf { it.isNotBlank() && it != "null" }, date, amount, t.optString("description").ifBlank { "Movimento" }, t.optBoolean("pending", false))
     }
 }

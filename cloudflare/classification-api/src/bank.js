@@ -241,15 +241,16 @@ async function transactions(request, env) {
     const query = "?date_from=" + dateFrom + (continuation ? "&continuation_key=" + encodeURIComponent(continuation) : "");
     const data = await ebFetch(env, "/accounts/" + encodeURIComponent(uid) + "/transactions" + query, { method: "GET" });
     for (const t of data.transactions || []) {
-      if (t.status && t.status !== "BOOK") continue;
+      const status = t.status || "BOOK";
+      if (!["BOOK", "PDNG", "HOLD"].includes(status)) continue;
       const amount = Number(t.transaction_amount && t.transaction_amount.amount);
       if (!Number.isFinite(amount) || amount === 0) continue;
-      const date = t.booking_date || t.value_date || t.transaction_date;
+      const date = t.status && t.status !== "BOOK" ? (t.transaction_date || t.value_date || t.booking_date) : (t.booking_date || t.value_date || t.transaction_date);
       if (!date) continue;
       const signed = (t.credit_debit_indicator === "DBIT" ? -1 : 1) * Math.abs(amount);
       const description = describe(t);
       const ref = t.entry_reference || t.transaction_id || null;
-      out.push({ id: ref, date, amount: signed, description });
+      out.push({ id: ref, date, amount: signed, description, pending: status !== "BOOK" });
     }
     continuation = data.continuation_key;
     if (!continuation) break;
