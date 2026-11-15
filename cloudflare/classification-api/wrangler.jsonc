@@ -7,7 +7,7 @@
   "assets": {
     "directory": "../../docs",
     "binding": "ASSETS",
-    "run_worker_first": ["/api/*"]
+    "run_worker_first": ["/api/*", "/banco/*"]
   },
   "d1_databases": [
     {
@@ -18,6 +18,8 @@
     }
   ],
   "vars": {
-    "ALLOWED_ORIGINS": "https://jokasman.github.io"
+    "ALLOWED_ORIGINS": "https://jokasman.github.io",
+    "ENABLE_BANKING_APP_ID": "aedb6c40-f89e-445c-bc96-25d72bffa4e6",
+    "BANK_REDIRECT_URL": "https://carteira-classificacao.faint-foxtail.workers.dev/banco/callback"
   }
 }

@@ -1,3 +1,5 @@
+import { handleBank } from "./bank.js";
+
 const REQUEST_SCHEMA = "pt.carteira.classification-request";
 const RESPONSE_SCHEMA = "pt.carteira.classification-response";
 const SCHEMA_VERSION = 2;
@@ -446,7 +448,10 @@ async function handleApi(request, env) {
 
 export default {
   async fetch(request, env, context) {
-    const response = await handleApi(request, env);
+    const url = new URL(request.url);
+    const response = (url.pathname.startsWith("/api/bank/") || url.pathname.startsWith("/banco/"))
+      ? await handleBank(request, env, url)
+      : await handleApi(request, env);
     context.waitUntil(cleanupExpiredData(env, Date.now()).catch(() => {}));
     return response;
   }

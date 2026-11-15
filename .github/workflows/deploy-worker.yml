@@ -30,6 +30,14 @@ jobs:
             echo "::error::Faltam os secrets CLOUDFLARE_API_TOKEN e/ou CLOUDFLARE_ACCOUNT_ID."
             exit 1
           fi
+      - name: Apply D1 migrations
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: cloudflare/classification-api
+          wranglerVersion: "4"
+          command: d1 migrations apply carteira-classificacao --remote
       - name: Deploy Worker
         uses: cloudflare/wrangler-action@v3
         with:
