@@ -199,7 +199,7 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
                 last!=null->bankDayKey((bankDayToMillis(last)?:System.currentTimeMillis())-5L*86400000)
                 latest!=null->bankDayKey(latest)
                 else->bankDayKey(System.currentTimeMillis()-90L*86400000)
-            }
+            }.let{day->bankDayKey(System.currentTimeMillis()).let{today->if(day>today)today else day}}
             val token=bankDeviceToken(context)
             val incoming=withContext(Dispatchers.IO){fetchBankTransactions(token,uid,fromDay)}
             val existing=dao.accountTransactionsSince(accountId,bankDayToMillis(fromDay)?:0L)

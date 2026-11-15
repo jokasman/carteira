@@ -231,7 +231,10 @@ async function transactions(request, env) {
   const hash = await deviceHash(body.deviceToken);
   const uid = String(body.accountUid || "");
   if (!(await deviceAccounts(hash, env)).some((a) => a.uid === uid)) throw bad("Esta conta não está ligada a este dispositivo.", 403);
-  const dateFrom = /^\d{4}-\d{2}-\d{2}$/.test(body.dateFrom || "") ? body.dateFrom : new Date(Date.now() - 90 * 86400000).toISOString().slice(0, 10);
+  const today = new Date().toISOString().slice(0, 10);
+  let dateFrom = /^\d{4}-\d{2}-\d{2}$/.test(body.dateFrom || "") ? body.dateFrom : new Date(Date.now() - 90 * 86400000).toISOString().slice(0, 10);
+  // A Enable Banking recusa datas futuras (ex.: movimentos com data-valor no futuro).
+  if (dateFrom > today) dateFrom = today;
   const out = [];
   let continuation = null;
   for (let page = 0; page < 30; page++) {
