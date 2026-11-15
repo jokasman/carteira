@@ -660,7 +660,10 @@ class MainActivity : ComponentActivity() {
     Scaffold(containerColor=Paper, topBar={
         Row(Modifier.fillMaxWidth().background(Paper).statusBarsPadding().padding(horizontal=22.dp, vertical=18.dp), verticalAlignment=Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) { Text("CARTEIRA", style=MaterialTheme.typography.labelMedium, color=Green, fontWeight=FontWeight.Bold); Text(pageTitle, style=MaterialTheme.typography.headlineSmall, color=Ink, fontWeight=FontWeight.Bold) }
-            if(section!="DetalheOrçamento"||canAddBudgetMovement) IconButton(onClick={addMovement(if(section=="DetalheOrçamento")activeBudgetId else null)}) { Icon(Icons.Default.Add, "Novo movimento", tint=Green) }
+            if(section=="Movimentos"){
+                TextButton(onClick={openCsvPicker()},contentPadding=PaddingValues(horizontal=6.dp,vertical=2.dp)){Icon(Icons.Default.FileOpen,null,tint=Green,modifier=Modifier.size(18.dp));Spacer(Modifier.width(3.dp));Text("CSV",color=Green)}
+                TextButton(onClick={openClassificationPicker()},contentPadding=PaddingValues(horizontal=6.dp,vertical=2.dp)){Icon(Icons.Default.AssignmentTurnedIn,null,tint=Green,modifier=Modifier.size(18.dp));Spacer(Modifier.width(3.dp));Text("Resposta",color=Green)}
+            } else if(section!="DetalheOrçamento"||canAddBudgetMovement) IconButton(onClick={addMovement(if(section=="DetalheOrçamento")activeBudgetId else null)}) { Icon(Icons.Default.Add, "Novo movimento", tint=Green) }
         }
     }, bottomBar={ NavigationBar(containerColor=Color.White) {
         listOf("Início" to Icons.Default.Home, "Movimentos" to Icons.Default.ReceiptLong, "Orçamentos" to Icons.Default.PieChart, "Contas" to Icons.Default.AccountBalanceWallet, "Relatórios" to Icons.Default.BarChart).forEach { (label, icon) ->
@@ -881,25 +884,26 @@ class MainActivity : ComponentActivity() {
     var budgetFilter by remember{mutableStateOf("Todos")}
     var originFilter by remember{mutableStateOf("Todas")}
     var showInactive by remember{mutableStateOf(false)}
-    var pendingView by remember{mutableStateOf(false)}
-    var datesBeforePendingView by remember{mutableStateOf<Pair<Long?,Long?>?>(null)}
+    var pendingView by remember{mutableStateOf(true)}
     val initialMonth=remember{currentMonthStart()}
-    var dateFrom by remember{mutableStateOf<Long?>(initialMonth)}
-    var dateTo by remember{mutableStateOf<Long?>(monthEndDay(initialMonth))}
+    var datesBeforePendingView by remember{mutableStateOf<Pair<Long?,Long?>?>(initialMonth to monthEndDay(initialMonth))}
+    var dateFrom by remember{mutableStateOf<Long?>(null)}
+    var dateTo by remember{mutableStateOf<Long?>(null)}
+    var filtersExpanded by remember{mutableStateOf(false)}
     var showDateFilter by remember{mutableStateOf(false)}
     var sort by remember{mutableStateOf("Mais recentes")}
     var sortExpanded by remember{mutableStateOf(false)}
     val filtered=tx.filter{transaction->
         val pendingMatches=transaction.active&&(transaction.kind=="Receita"||(transaction.kind=="Despesa"&&transaction.budgetId==null&&transaction.settlementRevenueId==null))
-        val typeMatches=pendingView||kindFilter=="Todos"||transaction.kind==kindFilter
-        val budgetMatches=pendingView||when(budgetFilter){
+        val typeMatches=kindFilter=="Todos"||transaction.kind==kindFilter
+        val budgetMatches=when(budgetFilter){
             "Sem orçamento"->transaction.kind=="Despesa"&&transaction.budgetId==null
             "Com orçamento"->transaction.kind=="Despesa"&&transaction.budgetId!=null
             else->true
         }
         val isCsv=transaction.importedFromCsv||transaction.importKey!=null
         val originMatches=when(originFilter){"CSV"->isCsv;"Manual"->!isCsv;else->true}
-        val activeMatches=if(pendingView)pendingMatches else showInactive||transaction.active
+        val activeMatches=(!pendingView||pendingMatches)&&(showInactive||transaction.active)
         val dateMatches=(dateFrom==null||transaction.date>=dateFrom!!) && (dateTo==null||transaction.date<=endOfDay(dateTo!!))
         typeMatches&&budgetMatches&&originMatches&&activeMatches&&dateMatches
     }.let{list->when(sort){
@@ -950,37 +954,46 @@ class MainActivity : ComponentActivity() {
             }
         } else Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){
             Text("${filtered.size} movimentos",Modifier.weight(1f),color=Muted,style=MaterialTheme.typography.labelSmall)
-            TextButton(onClick=importCsv,contentPadding=PaddingValues(horizontal=5.dp,vertical=2.dp)){Icon(Icons.Default.FileOpen,null,tint=Green,modifier=Modifier.size(17.dp));Spacer(Modifier.width(3.dp));Text("CSV",color=Green)}
-            TextButton(onClick=importClassificationResponse,contentPadding=PaddingValues(horizontal=5.dp,vertical=2.dp)){Icon(Icons.Default.AssignmentTurnedIn,null,tint=Green,modifier=Modifier.size(17.dp));Spacer(Modifier.width(3.dp));Text("Resposta",color=Green)}
         }
-        Row(horizontalArrangement=Arrangement.spacedBy(6.dp),modifier=Modifier.horizontalScroll(rememberScrollState()).padding(bottom=2.dp)){
+        fun togglePending(){
+            if(pendingView){
+                pendingView=false
+                datesBeforePendingView?.let{(from,to)->dateFrom=from;dateTo=to}
+                datesBeforePendingView=null
+            } else {
+                datesBeforePendingView=dateFrom to dateTo
+                dateFrom=null;dateTo=null
+                pendingView=true
+            }
+        }
+        val activeFilterCount=listOf(pendingView,kindFilter!="Todos",budgetFilter!="Todos",showInactive,originFilter!="Todas",dateFrom!=null||dateTo!=null).count{it}
+        Row(Modifier.fillMaxWidth().padding(bottom=2.dp),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(6.dp)){
             FilterChip(
-                selected=pendingView,
-                onClick={
-                    if(pendingView){
-                        pendingView=false
-                        datesBeforePendingView?.let{(from,to)->dateFrom=from;dateTo=to}
-                        datesBeforePendingView=null
-                    } else {
-                        datesBeforePendingView=dateFrom to dateTo
-                        dateFrom=null;dateTo=null
-                        pendingView=true
-                    }
-                },
-                label={Text("Receitas ativas e despesas sem orçamento")},
+                selected=filtersExpanded||activeFilterCount>0,onClick={filtersExpanded=!filtersExpanded},
+                label={Text(if(activeFilterCount>0)"Filtros ($activeFilterCount)" else "Filtros")},
+                leadingIcon={Icon(Icons.Default.FilterList,null,modifier=Modifier.size(18.dp))},
+                trailingIcon={Icon(if(filtersExpanded)Icons.Default.ExpandLess else Icons.Default.ExpandMore,null,modifier=Modifier.size(18.dp))},
                 colors=FilterChipDefaults.filterChipColors(selectedContainerColor=Mint)
             )
-            if(!pendingView) listOf("Todos","Despesa","Receita","Transferência","Ajuste").forEach{option->AssistChip(onClick={kindFilter=option},label={Text(option)},colors=AssistChipDefaults.assistChipColors(containerColor=if(kindFilter==option)Mint else Color.White))}
-            if(!pendingView){
-                listOf("Todos os orçamentos","Com orçamento","Sem orçamento").forEach{label->
-                    val value=if(label=="Todos os orçamentos")"Todos" else label
-                    AssistChip(onClick={budgetFilter=value},label={Text(label)},colors=AssistChipDefaults.assistChipColors(containerColor=if(budgetFilter==value)Mint else Color.White))
-                }
-                AssistChip(onClick={showInactive=!showInactive},label={Text(if(showInactive)"Inativos visíveis" else "Inativos ocultos")},colors=AssistChipDefaults.assistChipColors(containerColor=if(showInactive)Mint else Color.White))
+            FilterChip(selected=pendingView,onClick={togglePending()},label={Text("Por classificar")},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=Mint))
+            if(activeFilterCount>0) TextButton(onClick={
+                pendingView=false;datesBeforePendingView=null;kindFilter="Todos";budgetFilter="Todos";showInactive=false;originFilter="Todas";dateFrom=null;dateTo=null
+            },contentPadding=PaddingValues(horizontal=6.dp,vertical=2.dp)){Text("Limpar",color=Coral)}
+        }
+        if(filtersExpanded) Column(Modifier.fillMaxWidth().padding(bottom=4.dp).background(Color.White,RoundedCornerShape(14.dp)).padding(10.dp),verticalArrangement=Arrangement.spacedBy(4.dp)){
+            @Composable fun group(title:String,content:@Composable ()->Unit){
+                Text(title,color=Muted,style=MaterialTheme.typography.labelSmall,fontWeight=FontWeight.SemiBold)
+                Row(horizontalArrangement=Arrangement.spacedBy(6.dp),modifier=Modifier.horizontalScroll(rememberScrollState())){content()}
             }
-            listOf("Todas" to "Todas as origens","CSV" to "CSV","Manual" to "Manual").forEach{(value,label)->
-                AssistChip(onClick={originFilter=value},label={Text(label)},colors=AssistChipDefaults.assistChipColors(containerColor=if(originFilter==value)Mint else Color.White))
+            @Composable fun option(label:String,selected:Boolean,onClick:()->Unit){
+                FilterChip(selected=selected,onClick=onClick,label={Text(label)},colors=FilterChipDefaults.filterChipColors(selectedContainerColor=Mint))
             }
+            group("Vista"){option("Receitas ativas e despesas sem orçamento",pendingView){togglePending()}}
+            group("Tipo"){listOf("Todos","Despesa","Receita","Transferência","Ajuste").forEach{value->option(value,kindFilter==value){kindFilter=value}}}
+            group("Orçamento"){listOf("Todos" to "Todos","Com orçamento" to "Com orçamento","Sem orçamento" to "Sem orçamento").forEach{(value,label)->option(label,budgetFilter==value){budgetFilter=value}}}
+            group("Estado"){option("Só ativos",!showInactive){showInactive=false};option("Incluir inativos",showInactive){showInactive=true}}
+            group("Origem"){listOf("Todas" to "Todas","CSV" to "CSV","Manual" to "Manual").forEach{(value,label)->option(label,originFilter==value){originFilter=value}}}
+            Text("Os filtros combinam-se entre si. A data e a ordenação estão logo abaixo.",color=Muted,style=MaterialTheme.typography.labelSmall)
         }
         Row(Modifier.fillMaxWidth().padding(bottom=2.dp),verticalAlignment=Alignment.CenterVertically){
             FilterChip(
