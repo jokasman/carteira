@@ -254,8 +254,21 @@ async function transactions(request, env) {
   return json({ transactions: out });
 }
 
+let schemaReady = false;
+async function ensureSchema(env) {
+  if (schemaReady) return;
+  await env.DB.batch([
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS bank_config (name TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS bank_pending (state TEXT PRIMARY KEY NOT NULL, device_hash TEXT NOT NULL, aspsp TEXT NOT NULL, created_at INTEGER NOT NULL)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS bank_sessions (session_id TEXT PRIMARY KEY NOT NULL, device_hash TEXT NOT NULL, aspsp TEXT NOT NULL, accounts_json TEXT NOT NULL, valid_until TEXT, created_at INTEGER NOT NULL)"),
+    env.DB.prepare("CREATE INDEX IF NOT EXISTS bank_sessions_device_idx ON bank_sessions (device_hash)")
+  ]);
+  schemaReady = true;
+}
+
 export async function handleBank(request, env, url) {
   try {
+    await ensureSchema(env);
     if (url.pathname === "/banco/configurar" && request.method === "GET") return setupPage(env);
     if (url.pathname === "/banco/callback" && request.method === "GET") return await callback(url, env);
     if (url.pathname === "/api/bank/status" && request.method === "GET") return await status(env);
