@@ -1238,8 +1238,10 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
             if(selectionMode) Icon(if(selected)Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,"Selecionar movimento",tint=if(selected)Green else Muted,modifier=Modifier.size(22.dp))
             else Icon(if(t.kind=="Transferência")Icons.Default.SwapHoriz else if(expense)Icons.Default.ArrowUpward else Icons.Default.ArrowDownward,null,tint=color,modifier=Modifier.size(20.dp))
         }
-        Column(Modifier.weight(1f).padding(horizontal=12.dp)){
+        Column(Modifier.weight(1f).padding(start=12.dp)){
             Text(t.title.ifBlank{t.kind},color=if(t.active)Ink else Muted,fontWeight=FontWeight.SemiBold)
+            Row(Modifier.fillMaxWidth().padding(top=2.dp),verticalAlignment=Alignment.Top){
+            Column(Modifier.weight(1f).padding(end=8.dp)){
             val details=listOfNotNull(budgetLabel,if(t.recurring)"Recorrente" else null,if(t.importedFromCsv||t.importKey!=null)"CSV" else null,if(!t.active)"Inativo" else null,settlementIncomeTitle?.let{"Liquidada com $it"})
             Text(details.joinToString(" · "),color=if(t.active&&t.kind=="Despesa"&&t.budgetId==null)Coral else Muted,style=MaterialTheme.typography.labelSmall,maxLines=1)
             if(t.kind=="Despesa"&&t.budgetId==null&&assignBudget!=null) TextButton(
@@ -1254,8 +1256,10 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
             if(t.kind=="Despesa"&&settlementIncome!=null&&viewSettlement!=null) TextButton(
                 onClick={viewSettlement(settlementIncome)},contentPadding=PaddingValues(horizontal=0.dp,vertical=0.dp),modifier=Modifier.height(30.dp)
             ){Text("Ver receita associada",color=Green,style=MaterialTheme.typography.labelSmall)}
+            }
+            Column(horizontalAlignment=Alignment.End){Text("${if(expense)"−" else "+"}${money(kotlin.math.abs(t.amount))}",color=color,fontWeight=FontWeight.Bold);Text(SimpleDateFormat("dd MMM",Locale("pt","PT")).format(Date(t.date)),color=Muted,style=MaterialTheme.typography.labelSmall)}
+            }
         }
-        Column(horizontalAlignment=Alignment.End){Text("${if(expense)"−" else "+"}${money(kotlin.math.abs(t.amount))}",color=color,fontWeight=FontWeight.Bold);Text(SimpleDateFormat("dd MMM",Locale("pt","PT")).format(Date(t.date)),color=Muted,style=MaterialTheme.typography.labelSmall)}
     }
 }
 
