@@ -539,9 +539,15 @@ class MainActivity : ComponentActivity() {
     val budgetKeywords by model.budgetKeywords.collectAsState()
     val closedKeys=remember(budgetClosures){budgetClosures.map{it.budgetId to it.monthStart}.toSet()}
     val context=LocalContext.current
+    val prefs=remember{context.getSharedPreferences("carteira_prefs",android.content.Context.MODE_PRIVATE)}
+    var activeAccountId by remember{mutableLongStateOf(prefs.getLong("active_account_id",0L))}
+    val activeAccount=accounts.firstOrNull{it.id==activeAccountId}?:accounts.firstOrNull()
+    val accountTx=remember(transactions,activeAccount?.id){
+        activeAccount?.let{a->transactions.filter{it.accountId==a.id||it.toAccountId==a.id}}?:transactions
+    }
     val coroutineScope=rememberCoroutineScope()
     LaunchedEffect(Unit){withContext(Dispatchers.IO){cleanupExpiredClassificationRequests(context)}}
-    var section by remember { mutableStateOf("Início") }; var dialog by remember { mutableStateOf("") }
+    var section by remember { mutableStateOf("Orçamentos") }; var dialog by remember { mutableStateOf("") }
     var pendingDelete by remember { mutableStateOf<FinanceTransaction?>(null) }
     var pendingBulkDelete by remember { mutableStateOf<List<FinanceTransaction>?>(null) }
     var pendingBudgetAssignment by remember { mutableStateOf<FinanceTransaction?>(null) }
@@ -583,7 +589,7 @@ class MainActivity : ComponentActivity() {
                     parseMillenniumCsv(bytes)
                 }
                 pendingCsvImport=parsed
-                csvImportAccountId=accounts.firstOrNull()?.id?:0L
+                csvImportAccountId=activeAccount?.id?:accounts.firstOrNull()?.id?:0L
                 csvImportError=null
             } catch(cancelled:CancellationException){throw cancelled}
             catch(error:Exception){csvImportError=error.message?:"Não foi possível ler o CSV."}
@@ -676,7 +682,7 @@ class MainActivity : ComponentActivity() {
     val total = accounts.sumOf { accountBalance(it, transactions) }
     Scaffold(containerColor=Paper, topBar={
         Row(Modifier.fillMaxWidth().background(Paper).statusBarsPadding().padding(horizontal=22.dp, vertical=18.dp), verticalAlignment=Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) { Text("CARTEIRA", style=MaterialTheme.typography.labelMedium, color=Green, fontWeight=FontWeight.Bold); Text(pageTitle, style=MaterialTheme.typography.headlineSmall, color=Ink, fontWeight=FontWeight.Bold) }
+            Column(Modifier.weight(1f)) { Text(if(section in listOf("Movimentos","Orçamentos","DetalheOrçamento")&&activeAccount!=null)"CARTEIRA · ${activeAccount.name.uppercase()}" else "CARTEIRA", style=MaterialTheme.typography.labelMedium, color=Green, fontWeight=FontWeight.Bold, maxLines=1); Text(pageTitle, style=MaterialTheme.typography.headlineSmall, color=Ink, fontWeight=FontWeight.Bold) }
             if(section=="Movimentos"){
                 TextButton(onClick={openCsvPicker()},contentPadding=PaddingValues(horizontal=6.dp,vertical=2.dp)){Icon(Icons.Default.FileOpen,null,tint=Green,modifier=Modifier.size(18.dp));Spacer(Modifier.width(3.dp));Text("CSV",color=Green)}
                 TextButton(onClick={openClassificationPicker()},contentPadding=PaddingValues(horizontal=6.dp,vertical=2.dp)){Icon(Icons.Default.AssignmentTurnedIn,null,tint=Green,modifier=Modifier.size(18.dp));Spacer(Modifier.width(3.dp));Text("Resposta",color=Green)}
@@ -698,25 +704,25 @@ class MainActivity : ComponentActivity() {
             } else if(section!="DetalheOrçamento") IconButton(onClick={addMovement(if(section=="DetalheOrçamento")activeBudgetId else null)}) { Icon(Icons.Default.Add, "Novo movimento", tint=Green) }
         }
     }, bottomBar={ NavigationBar(containerColor=Color.White) {
-        listOf("Início" to Icons.Default.Home, "Movimentos" to Icons.Default.ReceiptLong, "Orçamentos" to Icons.Default.PieChart, "Contas" to Icons.Default.AccountBalanceWallet, "Relatórios" to Icons.Default.BarChart).forEach { (label, icon) ->
+        listOf("Movimentos" to Icons.Default.ReceiptLong, "Orçamentos" to Icons.Default.PieChart, "Contas" to Icons.Default.AccountBalanceWallet).forEach { (label, icon) ->
             NavigationBarItem(selected=section==label || (section=="DetalheOrçamento" && label=="Orçamentos"), onClick={section=label;selectedMovementIds=emptySet()}, icon={Icon(icon,label)}, label={Text(label, style=MaterialTheme.typography.labelSmall.copy(fontSize=9.sp,lineHeight=10.sp),maxLines=1,softWrap=false,textAlign=TextAlign.Center)}, colors=NavigationBarItemDefaults.colors(selectedIconColor=Green,selectedTextColor=Green,indicatorColor=Mint))
         }
     } }, floatingActionButton={ if(section in listOf("Movimentos","Orçamentos","Contas")||(section=="DetalheOrçamento"&&canAddBudgetMovement)) FloatingActionButton(onClick={when(section){"Orçamentos"->{pendingEdit=null;dialog="orçamento"};"Contas"->dialog="conta";"DetalheOrçamento"->addMovement(activeBudgetId);else->addMovement()}},containerColor=Green,contentColor=Color.White){Icon(Icons.Default.Add,"Adicionar")} }) { pad ->
         when(section) {
             "Início" -> HomePage(Modifier.padding(pad), total, transactions, accounts, budgets, budgetPeriods, {section=it}, {pendingDelete=it}, {editMovement(it)}, {addMovement()}, {budget->activeBudgetId=budget.id;selectedBudgetMonth=currentMonthStart();section="DetalheOrçamento"})
-            "Movimentos" -> TransactionsPage(Modifier.padding(pad), transactions, accounts, budgets, closedKeys, selectedMovementIds, {selectedMovementIds=it}, {pendingBulkDelete=it}, {pendingBudgetAssignment=it;dialog="atribuir-orçamento"}, {editMovement(it)}, {addMovement()}, {openCsvPicker()}, {openClassificationPicker()}, {requestMovementClassification(it)}, {pendingSettlementIncome=it;dialog="liquidar-receita"}, {pendingSettlementDetails=it;dialog="ver-liquidacao"})
-            "Contas" -> AccountsPage(Modifier.padding(pad), accounts, transactions, {pendingAccountEdit=null;dialog="conta"}, {pendingAccountEdit=it;dialog="editar-conta"})
-            "Orçamentos" -> BudgetsPage(Modifier.padding(pad), budgets, closedKeys, transactions, budgetPeriods, selectedBudgetMonth, {selectedBudgetMonth=it}, budgetSort, showClosedBudgets, showArchivedBudgets, {showClosedBudgets=it}, {pendingBudgetLimit=null;pendingBudgetEdit=null;dialog="orçamento"}, {budget->addMovement(budget.id)}, {budget->activeBudgetId=budget.id;section="DetalheOrçamento"}, {budget,closed->model.setBudgetClosed(budget.id,selectedBudgetMonth,closed)})
-            "DetalheOrçamento" -> BudgetDetailPage(Modifier.padding(pad), activeBudget, activeBudget?.let{(it.id to selectedBudgetMonth) in closedKeys}?:false, {budget,closed->model.setBudgetClosed(budget.id,selectedBudgetMonth,closed)}, transactions, accounts, budgetPeriods, selectedBudgetMonth, {selectedBudgetMonth=it}, {addMovement(activeBudget?.id)}, {pendingDelete=it}, {editMovement(it)}, {budget,monthStart,amount->pendingBudgetLimit=BudgetLimitTarget(budget.id,monthStart,amount);dialog="budget-limit"}, {budget->pendingBudgetEdit=budget;dialog="editar-orçamento"}, {budget->archiveFromMonth=selectedBudgetMonth;pendingBudgetArchive=budget}, {budget->model.unarchiveBudget(budget.id)}, budgetKeywords.filter{it.budgetId==activeBudget?.id}, {text->activeBudget?.let{model.addBudgetKeyword(it.id,text)}}, {keyword->model.removeBudgetKeyword(keyword.id)})
+            "Movimentos" -> TransactionsPage(Modifier.padding(pad), accountTx, accounts, budgets, closedKeys, selectedMovementIds, {selectedMovementIds=it}, {pendingBulkDelete=it}, {pendingBudgetAssignment=it;dialog="atribuir-orçamento"}, {editMovement(it)}, {addMovement()}, {openCsvPicker()}, {openClassificationPicker()}, {requestMovementClassification(it)}, {pendingSettlementIncome=it;dialog="liquidar-receita"}, {pendingSettlementDetails=it;dialog="ver-liquidacao"})
+            "Contas" -> AccountsPage(Modifier.padding(pad), accounts, transactions, activeAccount?.id, {account->activeAccountId=account.id;prefs.edit().putLong("active_account_id",account.id).apply();selectedMovementIds=emptySet()}, {pendingAccountEdit=null;dialog="conta"}, {pendingAccountEdit=it;dialog="editar-conta"})
+            "Orçamentos" -> BudgetsPage(Modifier.padding(pad), budgets, closedKeys, accountTx, budgetPeriods, selectedBudgetMonth, {selectedBudgetMonth=it}, budgetSort, showClosedBudgets, showArchivedBudgets, {showClosedBudgets=it}, {pendingBudgetLimit=null;pendingBudgetEdit=null;dialog="orçamento"}, {budget->addMovement(budget.id)}, {budget->activeBudgetId=budget.id;section="DetalheOrçamento"}, {budget,closed->model.setBudgetClosed(budget.id,selectedBudgetMonth,closed)})
+            "DetalheOrçamento" -> BudgetDetailPage(Modifier.padding(pad), activeBudget, activeBudget?.let{(it.id to selectedBudgetMonth) in closedKeys}?:false, {budget,closed->model.setBudgetClosed(budget.id,selectedBudgetMonth,closed)}, accountTx, accounts, budgetPeriods, selectedBudgetMonth, {selectedBudgetMonth=it}, {addMovement(activeBudget?.id)}, {pendingDelete=it}, {editMovement(it)}, {budget,monthStart,amount->pendingBudgetLimit=BudgetLimitTarget(budget.id,monthStart,amount);dialog="budget-limit"}, {budget->pendingBudgetEdit=budget;dialog="editar-orçamento"}, {budget->archiveFromMonth=selectedBudgetMonth;pendingBudgetArchive=budget}, {budget->model.unarchiveBudget(budget.id)}, budgetKeywords.filter{it.budgetId==activeBudget?.id}, {text->activeBudget?.let{model.addBudgetKeyword(it.id,text)}}, {keyword->model.removeBudgetKeyword(keyword.id)})
             else -> ReportsPage(Modifier.padding(pad), transactions)
         }
     }
     if(dialog.isNotEmpty()) when(dialog) {
-        "movimento" -> TransactionDialog(accounts,budgets,closedKeys,budgetRules,budgetKeywords,budgets.firstOrNull{it.id==movementBudgetId},pendingEdit,{value,rememberRule,forgetRule,done->model.saveTransaction(value,rememberRule,forgetRule,done)},{pendingEdit=null;dialog="";movementBudgetId=null},{pendingEdit=null;movementBudgetId=null;dialog="orçamento"},{transaction->pendingSplit=transaction;dialog="dividir-movimento"})
+        "movimento" -> TransactionDialog(accounts,budgets,closedKeys,budgetRules,budgetKeywords,budgets.firstOrNull{it.id==movementBudgetId},pendingEdit,{value,rememberRule,forgetRule,done->model.saveTransaction(value,rememberRule,forgetRule,done)},{pendingEdit=null;dialog="";movementBudgetId=null},{pendingEdit=null;movementBudgetId=null;dialog="orçamento"},{transaction->pendingSplit=transaction;dialog="dividir-movimento"},defaultAccountId=activeAccount?.id)
         "dividir-movimento" -> pendingSplit?.let{transaction->SplitTransactionDialog(transaction,budgets,closedKeys,{firstAmount,secondAmount,firstTitle,secondTitle,firstBudgetId,secondBudgetId,done->model.splitTransaction(transaction,firstAmount,secondAmount,firstTitle,secondTitle,firstBudgetId,secondBudgetId){success->done(success);if(success){pendingSplit=null;pendingEdit=null;movementBudgetId=null;dialog=""}}},{pendingSplit=null;dialog="movimento"})}
         "liquidar-receita" -> pendingSettlementIncome?.let{income->
             val linked=transactions.filter{it.settlementRevenueId==income.id}
-            val candidates=transactions.filter{(it.kind=="Despesa"&&it.active&&it.budgetId==null&&it.settlementRevenueId==null)||it.settlementRevenueId==income.id}
+            val candidates=accountTx.filter{(it.kind=="Despesa"&&it.active&&it.budgetId==null&&it.settlementRevenueId==null)}+linked
             SettleIncomeDialog(income,candidates,linked.map{it.id}.toSet(),{selectedIds,done->model.settleIncome(income.id,selectedIds,done)},{pendingSettlementIncome=null;dialog=""})
         }
         "ver-liquidacao" -> pendingSettlementDetails?.let{income->SettledExpensesDialog(income,transactions.filter{it.settlementRevenueId==income.id},{pendingSettlementDetails=null;pendingSettlementIncome=income;dialog="liquidar-receita"},{pendingSettlementDetails=null;pendingUndoSettlement=income;dialog=""},{pendingSettlementDetails=null;dialog=""})}
@@ -1062,8 +1068,29 @@ class MainActivity : ComponentActivity() {
     }
     if(showDateFilter) DateFilterDialog(dateFrom,dateTo,{from,to->dateFrom=from;dateTo=to;showDateFilter=false},{dateFrom=null;dateTo=null;showDateFilter=false},{showDateFilter=false})
 }
-@Composable private fun AccountsPage(modifier:Modifier,accounts:List<Account>,tx:List<FinanceTransaction>,add:()->Unit,edit:(Account)->Unit){Column(modifier.fillMaxSize().padding(20.dp)){Row(verticalAlignment=Alignment.CenterVertically){Text("Contas e carteiras",Modifier.weight(1f),style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold,color=Ink);TextButton(onClick=add){Text("+ Adicionar")}};Spacer(Modifier.height(8.dp));accounts.forEach{account->AccountDetail(account,tx){edit(account)};Spacer(Modifier.height(10.dp))}}}
-@Composable private fun AccountDetail(a:Account,tx:List<FinanceTransaction>,edit:()->Unit){val bal=accountBalance(a,tx);Row(Modifier.fillMaxWidth().background(Color.White,RoundedCornerShape(18.dp)).padding(start=18.dp,top=12.dp,bottom=12.dp,end=8.dp),verticalAlignment=Alignment.CenterVertically){Icon(Icons.Default.AccountBalanceWallet,null,tint=Green,modifier=Modifier.size(40.dp));Column(Modifier.weight(1f).padding(start=14.dp)){Text(a.name,color=Ink,fontWeight=FontWeight.Bold);Text(a.type,color=Muted,style=MaterialTheme.typography.bodySmall)};Text(money(bal),color=Ink,fontWeight=FontWeight.Bold);IconButton(onClick=edit){Icon(Icons.Default.Edit,"Editar conta",tint=Green)}} }
+@Composable private fun AccountsPage(modifier:Modifier,accounts:List<Account>,tx:List<FinanceTransaction>,activeId:Long?,select:(Account)->Unit,add:()->Unit,edit:(Account)->Unit){
+    Column(modifier.fillMaxSize().padding(20.dp).verticalScroll(rememberScrollState())){
+        Row(verticalAlignment=Alignment.CenterVertically){
+            Text("Contas e carteiras",Modifier.weight(1f),style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold,color=Ink)
+            TextButton(onClick=add){Text("+ Adicionar")}
+        }
+        Text("Toca numa conta para a pôr em vigor. Movimentos e Orçamentos mostram apenas a conta em vigor.",color=Muted,style=MaterialTheme.typography.bodySmall)
+        Spacer(Modifier.height(8.dp))
+        accounts.forEach{account->AccountDetail(account,tx,account.id==activeId,{select(account)}){edit(account)};Spacer(Modifier.height(10.dp))}
+    }
+}
+@Composable private fun AccountDetail(a:Account,tx:List<FinanceTransaction>,active:Boolean,select:()->Unit,edit:()->Unit){
+    val bal=accountBalance(a,tx)
+    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(if(active)Mint else Color.White).border(if(active)2.dp else 0.dp,if(active)Green else Color.Transparent,RoundedCornerShape(18.dp)).clickable(onClick=select).padding(start=18.dp,top=12.dp,bottom=12.dp,end=8.dp),verticalAlignment=Alignment.CenterVertically){
+        Icon(if(active)Icons.Default.CheckCircle else Icons.Default.AccountBalanceWallet,null,tint=Green,modifier=Modifier.size(40.dp))
+        Column(Modifier.weight(1f).padding(start=14.dp)){
+            Text(a.name,color=Ink,fontWeight=FontWeight.Bold)
+            Text(if(active)"${a.type} · Em vigor" else a.type,color=if(active)Green else Muted,style=MaterialTheme.typography.bodySmall,fontWeight=if(active)FontWeight.SemiBold else FontWeight.Normal)
+        }
+        Text(money(bal),color=Ink,fontWeight=FontWeight.Bold)
+        IconButton(onClick=edit){Icon(Icons.Default.Edit,"Editar conta",tint=Green)}
+    }
+}
 
 @Composable private fun BudgetsPage(
     modifier:Modifier,budgets:List<Budget>,closedKeys:Set<Pair<Long,Long>>,tx:List<FinanceTransaction>,budgetPeriods:List<BudgetPeriod>,
@@ -1452,7 +1479,8 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun TransactionDialog(
     accounts:List<Account>, budgets:List<Budget>, closedKeys:Set<Pair<Long,Long>>, budgetRules:List<BudgetRule>, budgetKeywords:List<BudgetKeyword>, pinnedBudget:Budget?, initial:FinanceTransaction?,
-    save:(FinanceTransaction,Boolean,Boolean,(Boolean)->Unit)->Unit, close:()->Unit, createBudget:()->Unit, split:(FinanceTransaction)->Unit
+    save:(FinanceTransaction,Boolean,Boolean,(Boolean)->Unit)->Unit, close:()->Unit, createBudget:()->Unit, split:(FinanceTransaction)->Unit,
+    defaultAccountId:Long?=null
 ){
     val movementId=initial?.id?:0L
     var title by remember(movementId){mutableStateOf(initial?.title.orEmpty())}
@@ -1464,7 +1492,7 @@ private fun budgetLimitFor(budget:Budget,periods:List<BudgetPeriod>,monthStart:L
     var active by remember(movementId){mutableStateOf(initial?.active?:true)}
     var note by remember(movementId){mutableStateOf(initial?.note.orEmpty())}
     var recurring by remember(movementId){mutableStateOf(initial?.recurring?:false)}
-    var accountId by remember(movementId){mutableLongStateOf(initial?.accountId?:accounts.firstOrNull()?.id?:0L)}
+    var accountId by remember(movementId){mutableLongStateOf(initial?.accountId?:defaultAccountId?.takeIf{id->accounts.any{it.id==id}}?:accounts.firstOrNull()?.id?:0L)}
     var destinationId by remember(movementId){mutableLongStateOf(initial?.toAccountId?:accounts.firstOrNull{it.id!=accountId}?.id?:accountId)}
     var budgetId by remember(movementId,pinnedBudget?.id){mutableLongStateOf(initial?.budgetId?:pinnedBudget?.id?:0L)}
     var manuallySelectedBudget by remember(movementId,pinnedBudget?.id){mutableStateOf(initial?.budgetId!=null||pinnedBudget!=null)}
