@@ -1,0 +1,39 @@
+name: Enable Banking keys
+
+# Gera o par de chaves para a Enable Banking.
+# A chave privada vai diretamente para os segredos do Worker e nunca é mostrada.
+# Só o certificado público fica disponível como artefacto, para carregar na Enable Banking.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  keys:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate key pair
+        run: |
+          umask 077
+          mkdir -p "$RUNNER_TEMP/eb"
+          openssl genrsa -out "$RUNNER_TEMP/eb/private.pem" 2048 2>/dev/null
+          openssl pkcs8 -topk8 -nocrypt -in "$RUNNER_TEMP/eb/private.pem" -out "$RUNNER_TEMP/eb/private-pkcs8.pem"
+          mkdir -p public
+          openssl req -new -x509 -key "$RUNNER_TEMP/eb/private.pem" -days 3650 -subj "/CN=Carteira" -out public/carteira-enable-banking.crt
+          openssl x509 -in public/carteira-enable-banking.crt -noout -subject -enddate
+      - name: Store private key as Worker secret
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        working-directory: cloudflare/classification-api
+        run: |
+          npx --yes wrangler@4 secret put ENABLE_BANKING_PRIVATE_KEY < "$RUNNER_TEMP/eb/private-pkcs8.pem"
+          rm -f "$RUNNER_TEMP/eb/"*
+      - name: Upload public certificate
+        uses: actions/upload-artifact@v4
+        with:
+          name: Enable-Banking-certificado
+          path: public/carteira-enable-banking.crt
+          retention-days: 7
