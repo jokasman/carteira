@@ -546,7 +546,9 @@ class MainActivity : ComponentActivity() {
     var movementBudgetId by remember { mutableStateOf<Long?>(null) }
     var selectedBudgetMonth by remember { mutableLongStateOf(currentMonthStart()) }
     var budgetSort by remember { mutableStateOf("Maior gasto") }
-    var showBudgetRemaining by remember { mutableStateOf(false) }
+    var showClosedBudgets by remember { mutableStateOf(false) }
+    var showArchivedBudgets by remember { mutableStateOf(false) }
+    var budgetMenuExpanded by remember { mutableStateOf(false) }
     var pendingCsvImport by remember { mutableStateOf<ParsedBankCsv?>(null) }
     var csvImportAccountId by remember { mutableLongStateOf(0L) }
     var csvImportError by remember { mutableStateOf<String?>(null) }
@@ -663,6 +665,21 @@ class MainActivity : ComponentActivity() {
             if(section=="Movimentos"){
                 TextButton(onClick={openCsvPicker()},contentPadding=PaddingValues(horizontal=6.dp,vertical=2.dp)){Icon(Icons.Default.FileOpen,null,tint=Green,modifier=Modifier.size(18.dp));Spacer(Modifier.width(3.dp));Text("CSV",color=Green)}
                 TextButton(onClick={openClassificationPicker()},contentPadding=PaddingValues(horizontal=6.dp,vertical=2.dp)){Icon(Icons.Default.AssignmentTurnedIn,null,tint=Green,modifier=Modifier.size(18.dp));Spacer(Modifier.width(3.dp));Text("Resposta",color=Green)}
+            } else if(section=="Orçamentos") Box {
+                TextButton(onClick={budgetMenuExpanded=true},contentPadding=PaddingValues(horizontal=6.dp,vertical=2.dp)){
+                    Icon(Icons.Default.Sort,null,tint=Green);Spacer(Modifier.width(4.dp))
+                    Text(budgetSort+if(showClosedBudgets||showArchivedBudgets)" · filtros" else "",color=Green)
+                }
+                DropdownMenu(expanded=budgetMenuExpanded,onDismissRequest={budgetMenuExpanded=false}){
+                    Text("Ordenar",color=Muted,style=MaterialTheme.typography.labelSmall,fontWeight=FontWeight.SemiBold,modifier=Modifier.padding(horizontal=12.dp,vertical=4.dp))
+                    listOf("Maior gasto","Menor gasto","Maior limite","Menor limite","Maior percentagem","Menor percentagem","Nome A–Z","Nome Z–A").forEach{option->
+                        DropdownMenuItem(text={Text(option,fontWeight=if(option==budgetSort)FontWeight.Bold else FontWeight.Normal,color=if(option==budgetSort)Green else Ink)},onClick={budgetSort=option;budgetMenuExpanded=false})
+                    }
+                    HorizontalDivider()
+                    Text("Filtros",color=Muted,style=MaterialTheme.typography.labelSmall,fontWeight=FontWeight.SemiBold,modifier=Modifier.padding(horizontal=12.dp,vertical=4.dp))
+                    DropdownMenuItem(text={Text("Mostrar fechados")},leadingIcon={Checkbox(showClosedBudgets,null)},onClick={showClosedBudgets=!showClosedBudgets})
+                    DropdownMenuItem(text={Text("Mostrar arquivados")},leadingIcon={Checkbox(showArchivedBudgets,null)},onClick={showArchivedBudgets=!showArchivedBudgets})
+                }
             } else if(section!="DetalheOrçamento"||canAddBudgetMovement) IconButton(onClick={addMovement(if(section=="DetalheOrçamento")activeBudgetId else null)}) { Icon(Icons.Default.Add, "Novo movimento", tint=Green) }
         }
     }, bottomBar={ NavigationBar(containerColor=Color.White) {
@@ -674,7 +691,7 @@ class MainActivity : ComponentActivity() {
             "Início" -> HomePage(Modifier.padding(pad), total, transactions, accounts, budgets, budgetPeriods, {section=it}, {pendingDelete=it}, {editMovement(it)}, {addMovement()}, {budget->activeBudgetId=budget.id;selectedBudgetMonth=currentMonthStart();section="DetalheOrçamento"})
             "Movimentos" -> TransactionsPage(Modifier.padding(pad), transactions, accounts, budgets, closedKeys, selectedMovementIds, {selectedMovementIds=it}, {pendingBulkDelete=it}, {pendingBudgetAssignment=it;dialog="atribuir-orçamento"}, {editMovement(it)}, {addMovement()}, {openCsvPicker()}, {openClassificationPicker()}, {requestMovementClassification(it)}, {pendingSettlementIncome=it;dialog="liquidar-receita"}, {pendingSettlementDetails=it;dialog="ver-liquidacao"})
             "Contas" -> AccountsPage(Modifier.padding(pad), accounts, transactions, {pendingAccountEdit=null;dialog="conta"}, {pendingAccountEdit=it;dialog="editar-conta"})
-            "Orçamentos" -> BudgetsPage(Modifier.padding(pad), budgets, closedKeys, transactions, budgetPeriods, selectedBudgetMonth, {selectedBudgetMonth=it}, budgetSort, {budgetSort=it}, showBudgetRemaining, {showBudgetRemaining=it}, {pendingBudgetLimit=null;pendingBudgetEdit=null;dialog="orçamento"}, {budget->addMovement(budget.id)}, {budget->activeBudgetId=budget.id;section="DetalheOrçamento"}, {budget,closed->model.setBudgetClosed(budget.id,selectedBudgetMonth,closed)})
+            "Orçamentos" -> BudgetsPage(Modifier.padding(pad), budgets, closedKeys, transactions, budgetPeriods, selectedBudgetMonth, {selectedBudgetMonth=it}, budgetSort, showClosedBudgets, showArchivedBudgets, {showClosedBudgets=it}, {pendingBudgetLimit=null;pendingBudgetEdit=null;dialog="orçamento"}, {budget->addMovement(budget.id)}, {budget->activeBudgetId=budget.id;section="DetalheOrçamento"}, {budget,closed->model.setBudgetClosed(budget.id,selectedBudgetMonth,closed)})
             "DetalheOrçamento" -> BudgetDetailPage(Modifier.padding(pad), activeBudget, activeBudget?.let{(it.id to selectedBudgetMonth) in closedKeys}?:false, {budget,closed->model.setBudgetClosed(budget.id,selectedBudgetMonth,closed)}, transactions, accounts, budgetPeriods, selectedBudgetMonth, {selectedBudgetMonth=it}, {addMovement(activeBudget?.id)}, {pendingDelete=it}, {editMovement(it)}, {budget,monthStart,amount->pendingBudgetLimit=BudgetLimitTarget(budget.id,monthStart,amount);dialog="budget-limit"}, {budget->pendingBudgetEdit=budget;dialog="editar-orçamento"}, {budget->archiveFromMonth=selectedBudgetMonth;pendingBudgetArchive=budget}, {budget->model.unarchiveBudget(budget.id)})
             else -> ReportsPage(Modifier.padding(pad), transactions)
         }
@@ -1035,14 +1052,11 @@ class MainActivity : ComponentActivity() {
 
 @Composable private fun BudgetsPage(
     modifier:Modifier,budgets:List<Budget>,closedKeys:Set<Pair<Long,Long>>,tx:List<FinanceTransaction>,budgetPeriods:List<BudgetPeriod>,
-    selectedMonth:Long,onMonthChange:(Long)->Unit,sort:String,onSortChange:(String)->Unit,
-    showRemaining:Boolean,onShowRemainingChange:(Boolean)->Unit,add:()->Unit,quickAdd:(Budget)->Unit,openBudget:(Budget)->Unit,
+    selectedMonth:Long,onMonthChange:(Long)->Unit,sort:String,
+    showClosed:Boolean,showArchived:Boolean,onShowClosedChange:(Boolean)->Unit,add:()->Unit,quickAdd:(Budget)->Unit,openBudget:(Budget)->Unit,
     setClosed:(Budget,Boolean)->Unit
 ){
     val allVisible=budgets.filter{budgetVisibleInMonth(it,selectedMonth)}
-    var showClosed by remember{mutableStateOf(false)}
-    val closedCount=allVisible.count{(it.id to selectedMonth) in closedKeys}
-    var showArchived by remember{mutableStateOf(false)}
     val archivedInMonth=budgets.filter{!budgetVisibleInMonth(it,selectedMonth)}
     val visible=(if(showClosed)allVisible else allVisible.filter{(it.id to selectedMonth) !in closedKeys})+
         (if(showArchived)archivedInMonth else emptyList())
@@ -1059,41 +1073,18 @@ class MainActivity : ComponentActivity() {
     val totalLimit=moneySum(allVisible.map{budgetLimitFor(it,budgetPeriods,selectedMonth)})
     val totalSpent=moneySum(allVisible.map{budgetSpent(it,tx,selectedMonth)})
     val totalRemaining=moneySum(listOf(totalLimit,-totalSpent))
-    var sortExpanded by remember{mutableStateOf(false)}
     LazyColumn(modifier.fillMaxSize(),contentPadding=PaddingValues(start=16.dp,end=16.dp,top=8.dp,bottom=16.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){
-        item {
-            Row(verticalAlignment=Alignment.CenterVertically){
-                Text("Orçamentos mensais",Modifier.weight(1f),style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold,color=Ink)
-                Box {
-                    TextButton(onClick={sortExpanded=true}){Icon(Icons.Default.Sort,null,tint=Green);Spacer(Modifier.width(4.dp));Text(sort,color=Green)}
-                    DropdownMenu(expanded=sortExpanded,onDismissRequest={sortExpanded=false}){
-                        listOf("Maior gasto","Menor gasto","Maior limite","Menor limite","Maior percentagem","Menor percentagem","Nome A–Z","Nome Z–A").forEach{option->DropdownMenuItem(text={Text(option)},onClick={onSortChange(option);sortExpanded=false})}
-                    }
-                }
-            }
-            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(Color.White).padding(3.dp)){
-                listOf(false to "Gasto (%)",true to "Restante (€)").forEach{(remaining,label)->
-                    TextButton(onClick={onShowRemainingChange(remaining)},modifier=Modifier.weight(1f).background(if(showRemaining==remaining)Green else Color.Transparent,RoundedCornerShape(22.dp))){Text(label,color=if(showRemaining==remaining)Color.White else Ink)}
-                }
-            }
-        }
         item { MonthNavigator(selectedMonth,onMonthChange) }
         item { BudgetTotalsCard(totalLimit,totalSpent,totalRemaining) }
-        if(closedCount>0||archivedInMonth.isNotEmpty()) item {
-            Row(horizontalArrangement=Arrangement.spacedBy(6.dp),modifier=Modifier.horizontalScroll(rememberScrollState())){
-                if(closedCount>0) AssistChip(onClick={showClosed=!showClosed},label={Text(if(showClosed)"A mostrar fechados ($closedCount)" else "Fechados ocultos ($closedCount)")},colors=AssistChipDefaults.assistChipColors(containerColor=if(showClosed)Mint else Color.White))
-                if(archivedInMonth.isNotEmpty()) AssistChip(onClick={showArchived=!showArchived},label={Text(if(showArchived)"A mostrar arquivados (${archivedInMonth.size})" else "Arquivados ocultos (${archivedInMonth.size})")},colors=AssistChipDefaults.assistChipColors(containerColor=if(showArchived)Mint else Color.White))
-            }
-        }
         if(sorted.isEmpty()) item {
-            if(allVisible.isNotEmpty()) EmptyCard("Todos os orçamentos deste mês estão fechados","Mostra os fechados para os ver ou reabre um orçamento no respetivo detalhe.","Mostrar fechados",{showClosed=true})
+            if(allVisible.isNotEmpty()) EmptyCard("Todos os orçamentos deste mês estão fechados","Mostra os fechados (botão de ordenação no topo) ou reabre um orçamento no respetivo detalhe.","Mostrar fechados",{onShowClosedChange(true)})
             else EmptyCard("Sem orçamentos neste mês","Cria um limite mensal para acompanhar as tuas despesas.","Criar orçamento",add)
         }
         else items(sorted,key={it.id}){budget->
             val closed=(budget.id to selectedMonth) in closedKeys
             val archived=!budgetVisibleInMonth(budget,selectedMonth)
             BudgetRow(
-                budget,tx,budgetPeriods,selectedMonth,showRemaining,
+                budget,tx,budgetPeriods,selectedMonth,false,
                 if(selectedMonth==currentMonthStart()&&!closed&&!archived){{quickAdd(budget)}}else null,
                 closed,archived,
                 if(archived)null else {{setClosed(budget,!closed)}}
@@ -1143,7 +1134,7 @@ class MainActivity : ComponentActivity() {
             }
         }
         Spacer(Modifier.height(6.dp));LinearProgressIndicator(progress={progress},modifier=Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(5.dp)),color=if(ratio>1)Coral else Green,trackColor=Mint,strokeCap= androidx.compose.ui.graphics.StrokeCap.Round)
-        Text(if(showRemaining)"Gasto ${money(spent)}" else if(spent>limit)"Ultrapassado ${money(spent-limit)}" else "Disponível ${money(limit-spent)}",color=if(ratio>1)Coral else Muted,style=MaterialTheme.typography.labelSmall,modifier=Modifier.padding(top=4.dp))
+        Text(if(showRemaining)"Gasto ${money(spent)}" else "Gasto ${money(spent)} · "+(if(spent>limit)"Ultrapassado ${money(spent-limit)}" else "Disponível ${money(limit-spent)}"),color=if(ratio>1)Coral else Muted,style=MaterialTheme.typography.labelSmall,modifier=Modifier.padding(top=4.dp))
     }
 }
 
