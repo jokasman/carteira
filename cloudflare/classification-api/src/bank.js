@@ -278,6 +278,23 @@ async function transactions(request, env) {
   return json({ transactions: out, raw, statuses, dateFrom, dateTo: useDateTo ? dateTo : null });
 }
 
+async function disconnect(request, env) {
+  const body = await readBody(request);
+  const hash = await deviceHash(body.deviceToken);
+  const uid = String(body.accountUid || "");
+  const rows = await env.DB.prepare("SELECT session_id, accounts_json FROM bank_sessions WHERE device_hash = ?").bind(hash).all();
+  const removedUids = [];
+  for (const row of rows.results || []) {
+    const accounts = JSON.parse(row.accounts_json);
+    if (uid && !accounts.some((a) => a.uid === uid)) continue;
+    // Revoga o consentimento na Enable Banking; se já tiver expirado, segue em frente.
+    try { await ebFetch(env, "/sessions/" + encodeURIComponent(row.session_id), { method: "DELETE" }); } catch (_) {}
+    await env.DB.prepare("DELETE FROM bank_sessions WHERE session_id = ?").bind(row.session_id).run();
+    for (const a of accounts) removedUids.push(a.uid);
+  }
+  return json({ removedUids });
+}
+
 let schemaReady = false;
 async function ensureSchema(env) {
   if (schemaReady) return;
@@ -302,6 +319,7 @@ export async function handleBank(request, env, url) {
     if (url.pathname === "/api/bank/start") return await start(request, env);
     if (url.pathname === "/api/bank/accounts") return await accounts(request, env);
     if (url.pathname === "/api/bank/transactions") return await transactions(request, env);
+    if (url.pathname === "/api/bank/disconnect") return await disconnect(request, env);
     return json({ error: "Operação desconhecida." }, 404);
   } catch (error) {
     const status = Number.isInteger(error.status) ? error.status : 500;

@@ -1241,7 +1241,20 @@ class MainActivity : ComponentActivity() {
                         }
                     },enabled=!busy,modifier=Modifier.fillMaxWidth()){Icon(Icons.Default.Sync,null);Spacer(Modifier.width(6.dp));Text("Sincronizar agora")}
                     TextButton(onClick={loadAccounts()},enabled=!busy){Text("Mudar conta do banco",color=Green)}
-                    TextButton(onClick={setBankLinkedUid(context,account.id,null);linked=null;lastSync=null;step="inicio";message=""},enabled=!busy){Text("Desligar do banco",color=Coral)}
+                    TextButton(onClick={
+                        val uid=linked
+                        busy=true;message=""
+                        scope.launch{
+                            try{
+                                val removed=if(uid==null)emptyList() else withContext(Dispatchers.IO){disconnectBank(bankDeviceToken(context),uid)}
+                                clearBankLinksForUids(context,removed+listOfNotNull(uid))
+                                setBankLinkedUid(context,account.id,null)
+                                linked=null;lastSync=null;step="inicio"
+                                message="Acesso ao banco revogado."+(if(removed.size>1)" Outras contas ligadas à mesma autorização também foram desligadas." else "")
+                            }catch(e:Exception){message=e.message?:"Não foi possível revogar o acesso. Tenta novamente."}
+                            busy=false
+                        }
+                    },enabled=!busy){Text("Desligar do banco",color=Coral)}
                 }
                 "inicio"->{
                     Text("1. Toca em Autorizar banco, escolhe o banco e autoriza no site do banco.",color=Ink)

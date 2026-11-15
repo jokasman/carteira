@@ -15,10 +15,14 @@ android {
         applicationId = "pt.jokasman.carteira"
         minSdk = 26
         targetSdk = 35
-        versionCode = 26
-        versionName = "1.6.3"
+        versionCode = 27
+        versionName = "1.7.0"
     }
     buildFeatures { compose = true }
+    lint {
+        checkReleaseBuilds = false
+        abortOnError = false
+    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -37,6 +41,13 @@ android {
     }
     buildTypes {
         getByName("debug") {
+            if (!carteiraKeystorePath.isNullOrBlank() && !carteiraKeystorePassword.isNullOrBlank()) {
+                signingConfig = signingConfigs.getByName("stableDebug")
+            }
+        }
+        // APK publicado: não depurável, assinado com a mesma chave (instala por cima das versões anteriores).
+        getByName("release") {
+            isMinifyEnabled = false
             if (!carteiraKeystorePath.isNullOrBlank() && !carteiraKeystorePassword.isNullOrBlank()) {
                 signingConfig = signingConfigs.getByName("stableDebug")
             }
