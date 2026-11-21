@@ -15,6 +15,7 @@ internal const val BANK_API_BASE = "https://carteira-classificacao.faint-foxtail
 
 internal data class BankAccountInfo(val uid: String, val iban: String?, val name: String, val aspsp: String, val validUntil: String?)
 internal data class BankTransaction(val id: String?, val date: String, val amount: Double, val description: String, val pending: Boolean = false, val bookingDate: String = date)
+internal data class BankSyncPreview(val accountId: Long, val uid: String, val fromDay: String, val raw: Int, val duplicates: Int, val rows: List<FinanceTransaction>, val confirmations: List<FinanceTransaction>)
 internal data class BankSyncResult(val imported: Int, val duplicates: Int, val unassignedExpenses: Int, val dateFrom: String, val pending: Int = 0, val confirmed: Int = 0, val received: Int = 0, val raw: Int = 0)
 
 private const val PREFS = "carteira_prefs"

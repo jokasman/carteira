@@ -189,7 +189,8 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
         } catch(cancelled:CancellationException){throw cancelled}
         catch(error:Exception){onComplete(null,error.message?:"Não foi possível importar o CSV.")}
     }
-    internal fun syncBank(context:android.content.Context,accountId:Long,uid:String,onComplete:(BankSyncResult?,String?)->Unit)=viewModelScope.launch {
+    // 1.º passo: vai buscar ao banco e prepara a pré-visualização (não grava nada).
+    internal fun prepareBankSync(context:android.content.Context,accountId:Long,uid:String,onComplete:(BankSyncPreview?,String?)->Unit)=viewModelScope.launch {
         try {
             if(dao.accountById(accountId)==null) error("Seleciona uma conta válida.")
             val last=bankLastSync(context,accountId)
@@ -233,7 +234,7 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
                 Prepared(t,signed,(if(t.pending)"ebp:" else "eb:")+"$uid:$digest")
             }
             var duplicates=0
-            var confirmed=0
+            val confirmations=mutableListOf<FinanceTransaction>()
             val remaining=prepared.filter{p->
                 if(p.key in existingKeys){
                     duplicates++
@@ -248,8 +249,7 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
                     val match=pendingRows.filter{r->signedCents(r)==p.signed&&kotlin.math.abs(r.date-bookedDay)<=7L*86400000}.minByOrNull{kotlin.math.abs(it.date-bookedDay)}
                     if(match!=null){
                         pendingRows.remove(match)
-                        dao.updateTransaction(match.copy(importKey=p.key,date=bookedDay))
-                        confirmed++
+                        confirmations+=match.copy(importKey=p.key,date=bookedDay)
                         return@filter false
                     }
                 }
@@ -278,12 +278,29 @@ class FinanceModel(private val dao: FinanceDao) : ViewModel() {
                     importKey=p.key
                 )
             }
-            val results=if(rows.isEmpty()) emptyList() else dao.importTransactions(rows)
-            val inserted=results.indices.filter{results[it]>=0L}
-            setBankLastSync(context,accountId,bankDayKey(System.currentTimeMillis()))
-            onComplete(BankSyncResult(inserted.size,duplicates+results.count{it<0L},inserted.count{rows[it].kind=="Despesa"&&rows[it].budgetId==null},fromDay,inserted.count{rows[it].importKey?.startsWith("ebp:")==true},confirmed,incoming.size,response.raw),null)
+            onComplete(BankSyncPreview(accountId,uid,fromDay,response.raw,duplicates,rows,confirmations),null)
         } catch(cancelled:CancellationException){throw cancelled}
         catch(error:Exception){onComplete(null,error.message?:"Não foi possível sincronizar com o banco.")}
+    }
+    // 2.º passo: grava só o que foi validado no ecrã de pré-visualização.
+    internal fun applyBankSync(context:android.content.Context,preview:BankSyncPreview,selected:List<FinanceTransaction>,onComplete:(BankSyncResult?,String?)->Unit)=viewModelScope.launch {
+        try {
+            if(dao.accountById(preview.accountId)==null) error("Seleciona uma conta válida.")
+            val allBudgets=dao.allBudgets().associateBy{it.id}
+            val closedMonths=dao.allBudgetClosures().map{it.budgetId to it.monthStart}.toSet()
+            val allowedKeys=preview.rows.mapNotNull{it.importKey}.toSet()
+            val rows=selected.filter{it.importKey in allowedKeys&&it.accountId==preview.accountId}.map{row->
+                val month=currentMonthStart(row.date)
+                val budgetOk=row.kind=="Despesa"&&row.budgetId?.let{id->allBudgets[id]?.let{b->budgetVisibleInMonth(b,month)&&(b.id to month) !in closedMonths}}==true
+                row.copy(budgetId=if(budgetOk)row.budgetId else null)
+            }
+            preview.confirmations.forEach{dao.updateTransaction(it)}
+            val results=if(rows.isEmpty()) emptyList() else dao.importTransactions(rows)
+            val inserted=results.indices.filter{results[it]>=0L}
+            setBankLastSync(context,preview.accountId,bankDayKey(System.currentTimeMillis()))
+            onComplete(BankSyncResult(inserted.size,preview.duplicates+results.count{it<0L},inserted.count{rows[it].kind=="Despesa"&&rows[it].budgetId==null},preview.fromDay,inserted.count{rows[it].importKey?.startsWith("ebp:")==true},preview.confirmations.size,preview.rows.size,preview.raw),null)
+        } catch(cancelled:CancellationException){throw cancelled}
+        catch(error:Exception){onComplete(null,error.message?:"Não foi possível importar os movimentos.")}
     }
     private fun csvImportKey(accountId:Long,movement:BankCsvMovement,merchantKey:String):String {
         val identity="$accountId|${movement.date}|$merchantKey|${movement.signedAmount}|${movement.balance ?: ""}|${movement.occurrence}"
@@ -866,7 +883,7 @@ class MainActivity : ComponentActivity() {
             dismissButton={TextButton(enabled=!undoing,onClick={pendingUndoSettlement=null;dialog=""}){Text("Cancelar",color=Muted)}}
         )
     }
-    bankDialogAccount?.let{account->BankDialog(account,model){bankDialogAccount=null}}
+    bankDialogAccount?.let{account->BankDialog(account,model,budgets,closedKeys){bankDialogAccount=null}}
     pendingBudgetArchive?.let { budget ->
         val affected=transactions.count{it.kind=="Despesa"&&it.budgetId==budget.id&&currentMonthStart(it.date)>=archiveFromMonth}
         AlertDialog(
@@ -1152,7 +1169,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-@Composable private fun BankDialog(account:Account,model:FinanceModel,close:()->Unit){
+@Composable private fun BankDialog(account:Account,model:FinanceModel,budgets:List<Budget>,closedKeys:Set<Pair<Long,Long>>,close:()->Unit){
     val context=LocalContext.current
     val scope=rememberCoroutineScope()
     var linked by remember{mutableStateOf(bankLinkedUid(context,account.id))}
@@ -1163,6 +1180,10 @@ class MainActivity : ComponentActivity() {
     var query by remember{mutableStateOf("")}
     var busy by remember{mutableStateOf(false)}
     var message by remember{mutableStateOf("")}
+    var preview by remember{mutableStateOf<BankSyncPreview?>(null)}
+    val included=remember{mutableStateMapOf<String,Boolean>()}
+    val chosenBudget=remember{mutableStateMapOf<String,Long>()}
+    val dayFormat=remember{SimpleDateFormat("dd MMM yyyy",Locale("pt","PT"))}
     fun loadAccounts(){
         busy=true;message="";step="contas"
         scope.launch{
@@ -1191,14 +1212,16 @@ class MainActivity : ComponentActivity() {
                     Button(onClick={
                         val uid=linked
                         if(uid!=null){
-                        busy=true;message=""
-                        model.syncBank(context,account.id,uid){result,error->
-                            busy=false
-                            if(result!=null){
-                                lastSync=bankLastSync(context,account.id)
-                                message="O banco devolveu ${result.raw} movimento(s) desde ${result.dateFrom}. ${result.imported} novo(s)"+(if(result.pending>0)" (${result.pending} pendente(s))" else "")+". ${result.duplicates} repetido(s) ignorado(s)."+(if(result.confirmed>0)" ${result.confirmed} pendente(s) confirmado(s) pelo banco." else "")+(if(result.unassignedExpenses>0)" ${result.unassignedExpenses} despesa(s) ficaram por classificar." else "")
-                            } else message=error?:"Não foi possível sincronizar."
-                        }
+                            busy=true;message=""
+                            model.prepareBankSync(context,account.id,uid){result,error->
+                                busy=false
+                                if(result!=null){
+                                    preview=result
+                                    included.clear();chosenBudget.clear()
+                                    result.rows.forEach{r->val k=r.importKey?:return@forEach;included[k]=true;chosenBudget[k]=r.budgetId?:0L}
+                                    step="previa"
+                                } else message=error?:"Não foi possível sincronizar."
+                            }
                         }
                     },enabled=!busy,modifier=Modifier.fillMaxWidth()){Icon(Icons.Default.Sync,null);Spacer(Modifier.width(6.dp));Text("Sincronizar agora")}
                     TextButton(onClick={loadAccounts()},enabled=!busy){Text("Mudar conta do banco",color=Green)}
@@ -1216,6 +1239,53 @@ class MainActivity : ComponentActivity() {
                             busy=false
                         }
                     },enabled=!busy){Text("Desligar do banco",color=Coral)}
+                }
+                "previa"->{
+                    val p=preview
+                    if(p!=null){
+                        Text("O banco devolveu ${p.raw} movimento(s) desde ${p.fromDay}. ${p.duplicates} repetido(s) já existem na app e não aparecem aqui."+(if(p.confirmations.isNotEmpty())" ${p.confirmations.size} pendente(s) vão ser confirmado(s)." else ""),color=Muted,style=MaterialTheme.typography.bodySmall)
+                        if(p.rows.isEmpty()) Text("Não há movimentos novos para importar.",color=Ink)
+                        else Text("Revê os movimentos e os orçamentos sugeridos. Desmarca o que não queres importar.",color=Ink)
+                        p.rows.forEach{row->
+                            val key=row.importKey?:return@forEach
+                            val month=currentMonthStart(row.date)
+                            val options=budgets.filter{budgetVisibleInMonth(it,month)&&(it.id to month) !in closedKeys}
+                            var menu by remember(key){mutableStateOf(false)}
+                            Row(Modifier.fillMaxWidth().background(if(included[key]==true)Color.White else Color(0xFFF0F2EF),RoundedCornerShape(12.dp)).padding(6.dp),verticalAlignment=Alignment.Top){
+                                Checkbox(included[key]==true,{included[key]=it},enabled=!busy)
+                                Column(Modifier.weight(1f)){
+                                    Text(row.title,color=Ink,fontWeight=FontWeight.SemiBold,style=MaterialTheme.typography.bodyMedium)
+                                    Text("${dayFormat.format(Date(row.date))} · ${if(row.kind=="Despesa")"−" else "+"}${money(row.amount)}"+(if(row.importKey?.startsWith("ebp:")==true)" · pendente" else ""),color=if(row.kind=="Despesa")Coral else Green,style=MaterialTheme.typography.labelSmall)
+                                    if(row.kind=="Despesa") Box{
+                                        val current=options.firstOrNull{it.id==chosenBudget[key]}
+                                        TextButton(onClick={menu=true},enabled=!busy&&included[key]==true,contentPadding=PaddingValues(horizontal=0.dp,vertical=0.dp)){
+                                            Text((current?.name?:"Sem orçamento")+" ▾",color=if(current==null)Muted else Green,style=MaterialTheme.typography.labelMedium)
+                                        }
+                                        DropdownMenu(expanded=menu,onDismissRequest={menu=false}){
+                                            DropdownMenuItem(text={Text("Sem orçamento")},onClick={chosenBudget[key]=0L;menu=false})
+                                            options.forEach{b->DropdownMenuItem(text={Text(b.name)},onClick={chosenBudget[key]=b.id;menu=false})}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        val count=p.rows.count{r->r.importKey?.let{included[it]}==true}
+                        Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp)){
+                            OutlinedButton(onClick={preview=null;step="ligada";message="Importação cancelada. Nada foi gravado."},enabled=!busy,modifier=Modifier.weight(1f)){Text("Cancelar")}
+                            Button(onClick={
+                                busy=true;message=""
+                                val selected=p.rows.filter{r->r.importKey?.let{included[it]}==true}.map{r->r.copy(budgetId=r.importKey?.let{chosenBudget[it]}?.takeIf{it>0L})}
+                                model.applyBankSync(context,p,selected){result,error->
+                                    busy=false
+                                    if(result!=null){
+                                        lastSync=bankLastSync(context,account.id)
+                                        preview=null;step="ligada"
+                                        message="${result.imported} movimento(s) importado(s)"+(if(result.pending>0)" (${result.pending} pendente(s))" else "")+"."+(if(result.confirmed>0)" ${result.confirmed} pendente(s) confirmado(s) pelo banco." else "")+(if(result.unassignedExpenses>0)" ${result.unassignedExpenses} despesa(s) ficaram por classificar." else "")
+                                    } else message=error?:"Não foi possível importar."
+                                }
+                            },enabled=!busy,modifier=Modifier.weight(1f)){Text(if(count>0)"Importar ($count)" else "Concluir")}
+                        }
+                    }
                 }
                 "inicio"->{
                     Text("1. Toca em Autorizar banco, escolhe o banco e autoriza no site do banco.",color=Ink)
